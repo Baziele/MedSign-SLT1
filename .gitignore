@@ -1,0 +1,34 @@
+# Source videos + metadata (22G, Kaggle: responsibleailab/signtalk-ghana)
+Medsign/
+
+# Extracted keypoints (13G .npz, reproducible via extract_keypoints.py)
+keypoints/
+
+# Rendered previews (mp4/png, reproducible via render_skeleton.py)
+previews/
+
+# Cached features (reproducible via dataset.py)
+cache/
+
+# Model checkpoints (tens of MB each; frozen versions live in experiments/*.zip)
+*.pt
+
+# Bundled archives
+*.zip
+
+# Raw numpy data
+*.npz
+*.npy
+
+# Generated predictions (reproducible via translate.py / retrieval_baseline.py)
+translation/
+retrieval/vectors.npz
+
+# Logs
+*.log
+nohup.out
+
+# Env / bytecode / OS
+.venv312/
+__pycache__/
+.DS_Store

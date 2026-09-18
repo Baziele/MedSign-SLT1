@@ -1,0 +1,8 @@
+# Pinned working set for MediaPipe Holistic extraction on Apple Silicon.
+# Install:  python3.12 -m venv .venv312 && .venv312/bin/pip install -r requirements.txt
+# NOTE: mediapipe 1.x removed the Holistic API and its face detector
+# hard-crashes on M1/M2/M3 (Metal). 0.10.21 is the version to use.
+mediapipe==0.10.21
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+tqdm==4.70.1
