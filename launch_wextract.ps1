@@ -1,0 +1,1 @@
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '.venv312w\Scripts\python -u wextract.py --max-videos 0 --workers 8 --min-sid 334 --max-sid 500 >> wextract_25k.log 2>&1' -WorkingDirectory 'C:\Users\Baziele\Documents\Code\medsign-multiview' -WindowStyle Hidden

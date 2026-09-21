@@ -203,6 +203,31 @@ def render_overlay(paths, videos_dir, out_dir, draw_face=True):
         print(f"wrote {out} ({t} frames)")
 
 
+def render_train_view(paths, out_dir, mode):
+    """Render exactly the joints a training run sees (black background).
+
+    mode=new: face contours (FACE_VERTS, 136) + FULL pose incl. head + hands.
+    mode=old: previous runs -- full pose + hands, no face.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    face = mode == "new"
+    for p in paths:
+        d = dict(np.load(p, allow_pickle=True))
+        T = int(d["n_frames"])
+        fps = round(float(d["fps"])) or 30
+        W, H = 640, 360
+        stem = os.path.splitext(os.path.basename(p))[0]
+        out = os.path.join(out_dir, f"trainview_{stem}_{mode}.mp4")
+        vw = cv2.VideoWriter(out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+        for t in range(T):
+            vw.write(draw_frame(d, t, W, H, draw_face=face, pose_head=True))
+        vw.release()
+        png = os.path.join(out_dir, f"trainview_{stem}_{mode}.png")
+        cv2.imwrite(png, draw_frame(d, T // 2, W, H,
+                                    draw_face=face, pose_head=True))
+        print(f"wrote {out} and {png}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Render skeleton preview video.")
     ap.add_argument("inputs", nargs="+", help=".npz files, one panel each")
@@ -219,9 +244,16 @@ def main():
         help="output directory for --overlay mode")
     ap.add_argument("--no-face", action="store_true",
                     help="omit the face/head skeleton (data untouched; viewing only)")
+    ap.add_argument("--train-view", choices=["new", "old"], default=None,
+                    help="render exactly the training joints: new (face contours "
+                         "+ full pose + hands) or old (pose + hands, no face)")
     ap.add_argument("--panel-w", type=int, default=640)
     ap.add_argument("--panel-h", type=int, default=360)
     args = ap.parse_args()
+
+    if args.train_view:
+        render_train_view(args.inputs, args.out_dir, args.train_view)
+        return
 
     if args.overlay:
         render_overlay(args.inputs, args.videos_dir, args.out_dir,

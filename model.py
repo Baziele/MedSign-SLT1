@@ -69,3 +69,116 @@ class SignTransformer(nn.Module):
             if (nxt == EOS_ID).all():
                 break
         return ys
+
+
+class TemporalConvFrontend(nn.Module):
+    """1D conv stack over time: T frames -> T/stride tokens.
+
+    Sign is redundant at 30fps (each sign sampled 8-15x); convs learn what to
+    keep per local window instead of blind uniform dropping. k=3/pad=1/stride=2
+    per layer so out_len = ceil(in_len / 2) exactly; 2 layers = 4x (256->64),
+    3 layers = 8x (256->32). Operates on (B, T, D) via transpose.
+    """
+
+    def __init__(self, in_dim, d_model=256, layers=2):
+        super().__init__()
+        assert layers in (2, 3)
+        self.layers = layers
+        self.stride_total = 2 ** layers
+        ch = [in_dim, 256, 256, d_model][: layers + 1]
+        convs = []
+        for i in range(layers):
+            convs += [nn.Conv1d(ch[i], ch[i + 1], kernel_size=3,
+                                stride=2, padding=1), nn.ReLU()]
+        self.convs = nn.Sequential(*convs)
+
+    @staticmethod
+    def out_len(n, layers):
+        for _ in range(layers):
+            n = (n + 1) // 2  # ceil(n/2) for k=3/pad=1/stride=2
+        return n
+
+    def forward(self, src):
+        # src: (B, T, D) -> (B, D, T) -> convs -> (B, d_model, T') -> (B, T', d_model)
+        return self.convs(src.transpose(1, 2)).transpose(1, 2)
+
+    def downsample_mask(self, mask, in_len=None):
+        """Strided-OR over time: output pad iff all receptive inputs are pad.
+
+        mask: (B, T) bool True=pad. Approximated by max-pooling the inverse
+        (valid=1) with k=3/stride=2/pad=1 per layer, then inverting back.
+        """
+        import torch.nn.functional as F
+
+        valid = (~mask).float().unsqueeze(1)  # (B, 1, T)
+        for _ in range(self.layers):
+            valid = F.max_pool1d(valid, kernel_size=3, stride=2, padding=1)
+        return valid.squeeze(1) < 0.5  # (B, T') bool True=pad
+
+
+class SignTransformerV2(nn.Module):
+    """Variable-length sister: (B, Tv<=256, D) -> vocab logits.
+
+    Frontend downsamples time 4-8x, encoder runs on T'<=64 tokens with a real
+    src_key_padding_mask (no more fixed-64 squash). Decoder identical to v1.
+    ckpt cfg carries {"variable": True, "frontend_layers": 2}.
+    """
+
+    def __init__(self, vocab_size, in_dim=633, d_model=256, nhead=4,
+                 enc_layers=4, dec_layers=4, dim_ff=1024, dropout=0.1,
+                 frontend_layers=2):
+        super().__init__()
+        self.frontend = TemporalConvFrontend(in_dim, d_model, frontend_layers)
+        self.tgt_emb = nn.Embedding(vocab_size, d_model, padding_idx=PAD_ID)
+        self.pos = SinusoidalPos(d_model, max_len=512)
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model, nhead, dim_ff, dropout,
+                                       batch_first=True), enc_layers)
+        self.decoder = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(d_model, nhead, dim_ff, dropout,
+                                       batch_first=True), dec_layers)
+        self.head = nn.Linear(d_model, vocab_size)
+        self.d_model = d_model
+
+    def encode(self, src, src_mask=None):
+        tok = self.frontend(src)  # (B, T', d_model)
+        if src_mask is not None:
+            mem_mask = self.frontend.downsample_mask(src_mask).to(src.device)
+        else:
+            mem_mask = None
+        return self.encoder(self.pos(tok), src_key_padding_mask=mem_mask)
+
+    def _causal(self, L, device):
+        return torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1)
+
+    def forward(self, src, tgt_in, tgt_pad_mask, src_mask=None):
+        mem = self.encode(src, src_mask)
+        if src_mask is not None:
+            mem_mask = self.frontend.downsample_mask(src_mask).to(src.device)
+        else:
+            mem_mask = None
+        out = self.decoder(self.pos(self.tgt_emb(tgt_in)), mem,
+                           tgt_mask=self._causal(tgt_in.size(1), src.device),
+                           tgt_key_padding_mask=tgt_pad_mask,
+                           memory_key_padding_mask=mem_mask)
+        return self.head(out)
+
+    @torch.no_grad()
+    def greedy(self, src, src_mask=None, max_len=60):
+        self.eval()
+        mem = self.encode(src, src_mask)
+        if src_mask is not None:
+            mem_mask = self.frontend.downsample_mask(src_mask).to(src.device)
+        else:
+            mem_mask = None
+        B = src.size(0)
+        ys = torch.full((B, 1), SOS_ID, dtype=torch.long, device=src.device)
+        for _ in range(max_len):
+            nxt = self.head(self.decoder(
+                self.pos(self.tgt_emb(ys)), mem,
+                tgt_mask=self._causal(ys.size(1), src.device),
+                memory_key_padding_mask=mem_mask))[:, -1:].argmax(-1)
+            ys = torch.cat([ys, nxt], dim=1)
+            if (nxt == EOS_ID).all():
+                break
+        return ys

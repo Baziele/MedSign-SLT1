@@ -12,7 +12,8 @@ import torch
 import torch.nn.functional as F
 
 from dataset import SignDataset, feat
-from model import SignTransformer
+from dataset import SignDatasetVar, feat_var
+from model import SignTransformer, SignTransformerV2
 from tokenizer import EOS_ID, SOS_ID, Tokenizer
 
 
@@ -23,10 +24,16 @@ def get_device():
 
 
 @torch.no_grad()
-def beam_search(model, src, beam=5, max_len=60, lp_alpha=0.6):
-    """Beam search with length penalty. src: (1, 64, 225). Returns id list."""
+def beam_search(model, src, beam=5, max_len=60, lp_alpha=0.6, src_mask=None):
+    """Beam search with length penalty. src: (1, Tv, D). Returns id list."""
     model.eval()
-    mem = model.encode(src)
+    if isinstance(model, SignTransformerV2):
+        mem = model.encode(src, src_mask)
+        mem_mask = model.frontend.downsample_mask(src_mask).to(src.device) \
+            if src_mask is not None else None
+    else:
+        mem = model.encode(src)
+        mem_mask = None
     beams = [([SOS_ID], 0.0)]
     done = []
     for _ in range(max_len):
@@ -38,8 +45,13 @@ def beam_search(model, src, beam=5, max_len=60, lp_alpha=0.6):
             y = torch.tensor([seq], device=src.device)
             causal = torch.triu(
                 torch.ones(len(seq), len(seq), dtype=torch.bool, device=src.device), diagonal=1)
-            logp = F.log_softmax(model.head(model.decoder(
-                model.pos(model.tgt_emb(y)), mem, tgt_mask=causal))[:, -1], -1)
+            if isinstance(model, SignTransformerV2):
+                logp = F.log_softmax(model.head(model.decoder(
+                    model.pos(model.tgt_emb(y)), mem, tgt_mask=causal,
+                    memory_key_padding_mask=mem_mask))[:, -1], -1)
+            else:
+                logp = F.log_softmax(model.head(model.decoder(
+                    model.pos(model.tgt_emb(y)), mem, tgt_mask=causal))[:, -1], -1)
             topk = logp[0].topk(beam)
             for v, lp in zip(topk.indices.tolist(), topk.values.tolist()):
                 cands.append((seq + [v], score + lp))
@@ -64,16 +76,34 @@ def main():
     tok = Tokenizer.load()
     ckpt = torch.load(args.ckpt, map_location=device)
     cfg = ckpt["cfg"]
-    model = SignTransformer(cfg["vocab"],
-                            in_dim=cfg.get("in_dim", 225),
-                            enc_layers=cfg.get("enc", 4),
-                            dec_layers=cfg.get("dec", 4)).to(device)
+    variable = cfg.get("variable", False)
+    if variable:
+        model = SignTransformerV2(cfg["vocab"],
+                                  in_dim=cfg.get("in_dim", 633),
+                                  enc_layers=cfg.get("enc", 4),
+                                  dec_layers=cfg.get("dec", 4),
+                                  frontend_layers=cfg.get("frontend_layers", 2)).to(device)
+    else:
+        model = SignTransformer(cfg["vocab"],
+                                in_dim=cfg.get("in_dim", 225),
+                                enc_layers=cfg.get("enc", 4),
+                                dec_layers=cfg.get("dec", 4)).to(device)
     model.load_state_dict(ckpt["state"])
     model.eval()
 
     def decode(stem):
-        src = torch.from_numpy(
-            feat(stem, velocity=cfg.get("in_dim", 225) == 450)).unsqueeze(0).to(device)
+        if variable:
+            kind = cfg.get("kind", "face256")
+            f = feat_var(stem, kind=kind)
+            src = torch.from_numpy(f).unsqueeze(0).to(device)
+            src_mask = torch.zeros(1, len(f), dtype=torch.bool, device=device)
+            if args.beam and args.beam > 1:
+                ids = beam_search(model, src, beam=args.beam, src_mask=src_mask)
+            else:
+                ids = model.greedy(src, src_mask=src_mask, max_len=60)[0].tolist()
+            return tok.decode(ids)
+        kind = cfg.get("kind") or ({225: "pos", 450: "posvel"}.get(cfg.get("in_dim", 225), "pos"))
+        src = torch.from_numpy(feat(stem, kind=kind)).unsqueeze(0).to(device)
         if args.beam and args.beam > 1:
             ids = beam_search(model, src, beam=args.beam)
         else:
@@ -81,7 +111,7 @@ def main():
         return tok.decode(ids)
 
     if args.split:
-        rows = SignDataset(args.split, tok).rows
+        rows = (SignDatasetVar if variable else SignDataset)(args.split, tok).rows
         out = [{"video": r["video"], "signer": r["signer"], "category": r["category"],
                 "true": r["text"], "pred": decode(r["stem"])} for r in rows]
         o = args.o or f"translation/preds_{args.split}.csv"

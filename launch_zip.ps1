@@ -1,0 +1,1 @@
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '.venv312w\Scripts\python -u box_zip.py >> zip_run.log 2>&1' -WorkingDirectory 'C:\Users\Baziele\Documents\Code\medsign-multiview' -WindowStyle Hidden

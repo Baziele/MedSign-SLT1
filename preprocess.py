@@ -24,6 +24,8 @@ KP_DIR = ROOT / "keypoints"
 SPLITS_DIR = ROOT / "splits"
 
 T_FRAMES = 64
+T_MAX = 256  # variable-length cap: clips shorter than this keep native frames;
+# only longer clips are linearly downsampled to T_MAX (no more squashing to 64).
 SHOULDER_L, SHOULDER_R = 11, 12
 EPS = 1e-6
 
@@ -127,6 +129,73 @@ def clip_features(stem, t=T_FRAMES, kp_dir=KP_DIR):
     )  # (t, 75, 3)
     feats = np.where(np.isfinite(feats), feats, 0.0).astype(np.float32)
     return feats.reshape(t, -1), {"median_angle": ang, "n_src": len(r["pose"])}
+
+
+# Training joints = exactly what the overlay videos render, plus the pose
+# head back: full pose 33 + full hands 21+21 + face contour subset
+# (FACE_VERTS: lips/eyes/brows/nose/jawline, 136 pts -- not the full 478).
+def clip_features_face(stem, t=T_FRAMES, kp_dir=KP_DIR):
+    """Full pipeline for one clip -> (t, 633) float32 + debug info."""
+    from render_skeleton import FACE_VERTS
+
+    r = load_raw(stem, kp_dir)
+    face = _interp_missing(r["face"], r["face_present"])
+    pose, hL, hR, face, ang = normalize(
+        r["pose"], r["handL"], r["handR"], face, r["pose_present"]
+    )
+    hL = np.where(r["handL_present"][:, None, None], hL, 0.0)
+    hR = np.where(r["handR_present"][:, None, None], hR, 0.0)
+    feats = np.concatenate(
+        [resample(pose, t), resample(hL, t), resample(hR, t),
+         resample(face[:, list(FACE_VERTS)], t)], axis=1
+    )  # (t, 211, 3)
+    feats = np.where(np.isfinite(feats), feats, 0.0).astype(np.float32)
+    return feats.reshape(t, -1), {"median_angle": ang, "n_src": len(r["pose"])}
+
+
+def _assemble(pose, hL, hR, face_part):
+    """Concatenate joint streams -> (N, D) float32. face_part=None for pos-only."""
+    parts = [pose, hL, hR] + ([face_part] if face_part is not None else [])
+    feats = np.concatenate(parts, axis=1)  # (N, J, 3)
+    feats = np.where(np.isfinite(feats), feats, 0.0).astype(np.float32)
+    return feats.reshape(len(feats), -1)
+
+
+def clip_features_var(stem, t_max=T_MAX, kind="face", kp_dir=KP_DIR):
+    """Variable-length pipeline for one clip -> (Tv, D) float32 + debug info.
+
+    Same normalize as fixed path, but NO squash to 64: clips with N <= t_max
+    keep native frame count (temporal resolution preserved); only N > t_max
+    clips are linearly downsampled to t_max. Caller pads + masks per batch.
+    kind: "pos" -> (Tv, 225) | "face" -> (Tv, 633).
+    """
+    from render_skeleton import FACE_VERTS
+
+    r = load_raw(stem, kp_dir)
+    n_src = len(r["pose"])
+    if kind == "face":
+        face = _interp_missing(r["face"], r["face_present"])
+        pose, hL, hR, face, ang = normalize(
+            r["pose"], r["handL"], r["handR"], face, r["pose_present"]
+        )
+        face_sub = face[:, list(FACE_VERTS)]
+    elif kind == "pos":
+        pose, hL, hR, _, ang = normalize(
+            r["pose"], r["handL"], r["handR"], r["face"], r["pose_present"]
+        )
+        face_sub = None
+    else:
+        raise ValueError(f"unknown kind {kind!r} (want 'pos' or 'face')")
+    hL = np.where(r["handL_present"][:, None, None], hL, 0.0)
+    hR = np.where(r["handR_present"][:, None, None], hR, 0.0)
+    if n_src > t_max:
+        pose = resample(pose, t_max)
+        hL = resample(hL, t_max)
+        hR = resample(hR, t_max)
+        if face_sub is not None:
+            face_sub = resample(face_sub, t_max)
+    feats = _assemble(pose, hL, hR, face_sub)
+    return feats, {"median_angle": ang, "n_src": n_src, "t_var": len(feats)}
 
 
 def iter_split(name, splits_dir=SPLITS_DIR):

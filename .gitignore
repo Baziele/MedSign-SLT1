@@ -1,5 +1,6 @@
 # Source videos + metadata (22G, Kaggle: responsibleailab/signtalk-ghana)
 Medsign/
+mv-data/
 
 # Extracted keypoints (13G .npz, reproducible via extract_keypoints.py)
 keypoints/
@@ -15,6 +16,13 @@ cache/
 
 # Bundled archives
 *.zip
+
+# Pulled Android APKs (binaries, reproducible via adb pull)
+apk/
+*.apk
+
+# GSL dictionary dump (videos + manifest, reproducible via download_gsl.py)
+gsl-dictionary/
 
 # Raw numpy data
 *.npz
