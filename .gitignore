@@ -1,42 +1,48 @@
-# Source videos + metadata (22G, Kaggle: responsibleailab/signtalk-ghana)
-Medsign/
-mv-data/
+# Python / env / OS
+__pycache__/
+*.pyc
+.venv312/
+.DS_Store
 
-# Extracted keypoints (13G .npz, reproducible via extract_keypoints.py)
-keypoints/
-
-# Rendered previews (mp4/png, reproducible via render_skeleton.py)
-previews/
-
-# Cached features (reproducible via dataset.py)
-cache/
-
-# Model checkpoints (tens of MB each; frozen versions live in experiments/*.zip)
-*.pt
-
-# Bundled archives
-*.zip
-
-# Pulled Android APKs (binaries, reproducible via adb pull)
-apk/
-*.apk
-
-# GSL dictionary dump (videos + manifest, reproducible via download_gsl.py)
-gsl-dictionary/
-
-# Raw numpy data
-*.npz
-*.npy
-
-# Generated predictions (reproducible via translate.py / retrieval_baseline.py)
-translation/
-retrieval/vectors.npz
-
-# Logs
+# Run outputs
+logs/
 *.log
 nohup.out
+*.tmp
 
-# Env / bytecode / OS
-.venv312/
-__pycache__/
-.DS_Store
+# Scratch (personal clips, notes, one-off artifacts)
+scratch/
+
+# Data (see README for layout). Frozen splits + manifests stay tracked;
+# everything else here is reproducible or too large for git.
+data/jw/
+data/multiview/
+data/cache/
+data/live/
+data/gsl/
+data/checkpoints/
+models/checkpoints/
+*.pt
+*.npz
+*.npy
+*.mp4
+*.mov
+*.whl
+*.task
+get-pip.py
+dataset-metadata.json
+kernel-metadata.json
+*.apk
+apk/
+apkwork/
+translation/
+retrieval/vectors.npz
+previews/
+bench/*.log
+
+# Generated artifacts (reproducible via make_*_splits.py, tokenizer.py;
+# tracked copies stay tracked)
+*.csv
+tokenizer_all.json
+bpe_all_8k.json*
+run_*.json

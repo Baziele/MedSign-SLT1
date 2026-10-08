@@ -33,9 +33,13 @@ class SignTransformer(nn.Module):
         self.src_proj = nn.Linear(in_dim, d_model)
         self.tgt_emb = nn.Embedding(vocab_size, d_model, padding_idx=PAD_ID)
         self.pos = SinusoidalPos(d_model)
+        # enable_nested_tensor=False: the nested-tensor fast path for padding
+        # masks is not implemented on MPS (torch 2.x) and crashes; the masked
+        # math is identical, just the slower standard kernel.
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model, nhead, dim_ff, dropout,
-                                       batch_first=True), enc_layers)
+                                       batch_first=True), enc_layers,
+            enable_nested_tensor=False)
         self.decoder = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(d_model, nhead, dim_ff, dropout,
                                        batch_first=True), dec_layers)
@@ -133,12 +137,18 @@ class SignTransformerV2(nn.Module):
         self.pos = SinusoidalPos(d_model, max_len=512)
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model, nhead, dim_ff, dropout,
-                                       batch_first=True), enc_layers)
+                                       batch_first=True), enc_layers,
+            enable_nested_tensor=False)
         self.decoder = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(d_model, nhead, dim_ff, dropout,
                                        batch_first=True), dec_layers)
         self.head = nn.Linear(d_model, vocab_size)
+        # TxtCTC head: frame-to-token alignment without glosses. Linear map
+        # encoder states -> vocab distribution trained with CTC over the
+        # transcript's own token ids (blank=PAD=0, never emitted by tokenizers).
+        self.ctc_head = nn.Linear(d_model, vocab_size)
         self.d_model = d_model
+        self.frontend_layers = frontend_layers
 
     def encode(self, src, src_mask=None):
         tok = self.frontend(src)  # (B, T', d_model)
@@ -146,13 +156,19 @@ class SignTransformerV2(nn.Module):
             mem_mask = self.frontend.downsample_mask(src_mask).to(src.device)
         else:
             mem_mask = None
+        # NOTE: MPS auto-dispatch only. Do NOT force an SDPA backend here:
+        # forcing MATH crashes on dropout; auto mode is proven over 90k steps.
         return self.encoder(self.pos(tok), src_key_padding_mask=mem_mask)
 
     def _causal(self, L, device):
         return torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1)
 
-    def forward(self, src, tgt_in, tgt_pad_mask, src_mask=None):
-        mem = self.encode(src, src_mask)
+    def forward(self, src, tgt_in, tgt_pad_mask, src_mask=None,
+                mem=None, return_mem=False):
+        # mem passthrough lets scheduled sampling reuse pass-1's encoding so
+        # only the (cheap) decoder runs twice.
+        if mem is None:
+            mem = self.encode(src, src_mask)
         if src_mask is not None:
             mem_mask = self.frontend.downsample_mask(src_mask).to(src.device)
         else:
@@ -161,7 +177,18 @@ class SignTransformerV2(nn.Module):
                            tgt_mask=self._causal(tgt_in.size(1), src.device),
                            tgt_key_padding_mask=tgt_pad_mask,
                            memory_key_padding_mask=mem_mask)
-        return self.head(out)
+        logits = self.head(out)
+        return (logits, mem) if return_mem else logits
+
+    def frontend_lens(self, src_lens):
+        """Input frame counts -> frontend token counts (exact for k3/pad1/s2)."""
+        return torch.tensor(
+            [TemporalConvFrontend.out_len(int(n), self.frontend_layers)
+             for n in src_lens], dtype=torch.long, device=src_lens.device)
+
+    def ctc_log_probs(self, mem):
+        """Encoder states -> per-token log-distributions over vocab (T', B, V)."""
+        return self.ctc_head(mem).log_softmax(-1).transpose(0, 1)
 
     @torch.no_grad()
     def greedy(self, src, src_mask=None, max_len=60):

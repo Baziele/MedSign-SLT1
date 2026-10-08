@@ -1,0 +1,1 @@
+{"active": "all_word_v1", "ckpt": "all_word_v1.pt", "tokenizer": "tokenizer_all.json", "tok_type": "word", "note": "Paths relative to models/. Web app: resolve here, never hardcode a checkpoint filename."}

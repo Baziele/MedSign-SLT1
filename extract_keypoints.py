@@ -218,9 +218,10 @@ def main():
     ap = argparse.ArgumentParser(description="MediaPipe Holistic keypoint extraction (resumable).")
     ap.add_argument("--videos-dir", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "Medsign", "archive", "SignTalk-GH", "Videos"))
+        "data", "multiview", "Medsign", "archive", "SignTalk-GH", "Videos"))
     ap.add_argument("--out-dir", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "keypoints"))
+        os.path.dirname(os.path.abspath(__file__)),
+        "data", "multiview", "keypoints"))
     ap.add_argument("--max-videos", type=int, default=30,
                     help="How many videos (natural-sorted) to process. 0 = all. Default 30.")
     ap.add_argument("--overwrite", action="store_true",

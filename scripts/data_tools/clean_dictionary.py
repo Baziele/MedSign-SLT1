@@ -5,14 +5,14 @@
 same mp4 but with distinct .npz outputs. Single-word rows keep the
 original npz name so already-extracted files are skipped, not redone.
 
-Usage: clean_dictionary.py  ->  gsl-dictionary/dictionary_clean.csv
+Usage: scripts/data_tools/clean_dictionary.py  ->  data/gsl/dictionary_clean.csv
 """
 import csv
 import os
 import re
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-GSL = os.path.join(ROOT, "gsl-dictionary")
+GSL = os.path.join(ROOT, "data", "gsl")
 
 
 def slug(s):

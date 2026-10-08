@@ -1,0 +1,177 @@
+{
+  "seed": 42,
+  "text_fracs": {
+    "train": 0.8,
+    "val": 0.1,
+    "test_T": 0.1
+  },
+  "test_R_frac_of_train_pool": 0.07,
+  "guards": {
+    "dropped": [
+      "1088Z.mkv",
+      "1088Z.mp4"
+    ],
+    "quarantined_to_train": [
+      "2945B.mp4",
+      "3006C.mp4"
+    ],
+    "skipped": {
+      "dropped_Z": 1
+    }
+  },
+  "counts": {
+    "train": 7337,
+    "val": 994,
+    "test_T": 994,
+    "test_R": 552
+  },
+  "text_groups": {
+    "train": 3152,
+    "val": 396,
+    "test_T": 396
+  },
+  "per_split_category": {
+    "train": {
+      "Ophthalmology & Vision Care": 140,
+      "Prescriptions": 454,
+      "General hospital interactions": 453,
+      "Medical emergencies": 453,
+      "ENT (Ear, Nose, and Throat) Interactions": 213,
+      "Pharmacy interactions": 453,
+      "Nursing/Patient care": 450,
+      "Orthopedic & Physical Therapy": 213,
+      "Admin and billing": 306,
+      "Doctor-Patient interactions": 464,
+      "Common symptons": 303,
+      "Cardiovascular health": 142,
+      "Emotional Phrase": 304,
+      "Questions from patients": 302,
+      "Respiratory & Pulmonary Care": 140,
+      "Human Body Parts": 164,
+      "Mental health interactions": 306,
+      "Infectious disease and prevention": 279,
+      "Pediatric interaction": 480,
+      "Geriatric Interactions": 207,
+      "Dental Interactions": 146,
+      "Nutrition and Diet": 64,
+      "Travel Medicine": 67,
+      "Dermatology and skin conditions": 231,
+      "Medical history": 299,
+      "Treatment and diagnosis": 304
+    },
+    "val": {
+      "Prescriptions": 57,
+      "General hospital interactions": 60,
+      "Medical emergencies": 60,
+      "ENT (Ear, Nose, and Throat) Interactions": 30,
+      "Pharmacy interactions": 60,
+      "Nursing/Patient care": 63,
+      "Orthopedic & Physical Therapy": 30,
+      "Admin and billing": 40,
+      "Doctor-Patient interactions": 58,
+      "Common symptons": 40,
+      "Cardiovascular health": 20,
+      "Emotional Phrase": 40,
+      "Questions from patients": 40,
+      "Respiratory & Pulmonary Care": 20,
+      "Human Body Parts": 22,
+      "Mental health interactions": 40,
+      "Infectious disease and prevention": 36,
+      "Pediatric interaction": 66,
+      "Geriatric Interactions": 36,
+      "Dental Interactions": 20,
+      "Nutrition and Diet": 10,
+      "Travel Medicine": 10,
+      "Dermatology and skin conditions": 32,
+      "Medical history": 40,
+      "Treatment and diagnosis": 42,
+      "Ophthalmology & Vision Care": 22
+    },
+    "test_T": {
+      "Prescriptions": 60,
+      "General hospital interactions": 60,
+      "Medical emergencies": 60,
+      "ENT (Ear, Nose, and Throat) Interactions": 30,
+      "Pharmacy interactions": 60,
+      "Nursing/Patient care": 60,
+      "Orthopedic & Physical Therapy": 30,
+      "Admin and billing": 38,
+      "Doctor-Patient interactions": 58,
+      "Common symptons": 40,
+      "Cardiovascular health": 20,
+      "Emotional Phrase": 40,
+      "Questions from patients": 40,
+      "Respiratory & Pulmonary Care": 22,
+      "Human Body Parts": 22,
+      "Mental health interactions": 40,
+      "Infectious disease and prevention": 40,
+      "Pediatric interaction": 68,
+      "Geriatric Interactions": 30,
+      "Dental Interactions": 20,
+      "Nutrition and Diet": 10,
+      "Travel Medicine": 10,
+      "Dermatology and skin conditions": 32,
+      "Medical history": 44,
+      "Treatment and diagnosis": 40,
+      "Ophthalmology & Vision Care": 20
+    },
+    "test_R": {
+      "Admin and billing": 16,
+      "Cardiovascular health": 18,
+      "Common symptons": 17,
+      "Dental Interactions": 14,
+      "Dermatology and skin conditions": 27,
+      "Doctor-Patient interactions": 27,
+      "ENT (Ear, Nose, and Throat) Interactions": 27,
+      "Emotional Phrase": 16,
+      "General hospital interactions": 27,
+      "Geriatric Interactions": 27,
+      "Human Body Parts": 16,
+      "Infectious disease and prevention": 17,
+      "Medical emergencies": 27,
+      "Medical history": 17,
+      "Mental health interactions": 18,
+      "Nursing/Patient care": 27,
+      "Nutrition and Diet": 16,
+      "Ophthalmology & Vision Care": 18,
+      "Orthopedic & Physical Therapy": 27,
+      "Pediatric interaction": 36,
+      "Pharmacy interactions": 27,
+      "Prescriptions": 27,
+      "Questions from patients": 18,
+      "Respiratory & Pulmonary Care": 18,
+      "Travel Medicine": 13,
+      "Treatment and diagnosis": 14
+    }
+  },
+  "per_split_signer": {
+    "train": {
+      "A": 1488,
+      "B": 1495,
+      "D": 1341,
+      "E": 1522,
+      "C": 1491
+    },
+    "val": {
+      "B": 201,
+      "D": 179,
+      "E": 205,
+      "A": 206,
+      "C": 203
+    },
+    "test_T": {
+      "B": 202,
+      "D": 180,
+      "E": 208,
+      "A": 203,
+      "C": 201
+    },
+    "test_R": {
+      "B": 102,
+      "E": 115,
+      "A": 120,
+      "C": 117,
+      "D": 98
+    }
+  }
+}

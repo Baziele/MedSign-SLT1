@@ -51,7 +51,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "gsl-dictionary"))
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "data", "gsl"))
     args = ap.parse_args()
     os.makedirs(os.path.join(args.out, "videos"), exist_ok=True)
     log = open(os.path.join(args.out, "download.log"), "a")

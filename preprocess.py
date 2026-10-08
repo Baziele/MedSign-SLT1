@@ -20,8 +20,8 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
-KP_DIR = ROOT / "keypoints"
-SPLITS_DIR = ROOT / "splits"
+KP_DIR = ROOT / "data" / "multiview" / "keypoints"
+SPLITS_DIR = ROOT / "data" / "splits"
 
 T_FRAMES = 64
 T_MAX = 256  # variable-length cap: clips shorter than this keep native frames;

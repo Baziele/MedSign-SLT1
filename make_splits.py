@@ -12,7 +12,7 @@ Design (agreed with user):
 - Guards: drop 1088Z video; pin 3006C + 2945B outlier videos to train by
   forcing their text groups into the train pool.
 
-Outputs: splits/{train,val,test_T,test_R}.csv + splits/summary.json
+Outputs: data/splits/{train,val,test_T,test_R}.csv + data/splits/summary.json
 CSV cols: video,stem,sentence_id,text,category,signer
 """
 import csv
@@ -23,9 +23,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VID_DIR = ROOT / "Medsign" / "archive" / "SignTalk-GH" / "Videos"
-META = ROOT / "Medsign" / "archive" / "SignTalk-GH" / "Metadata.xlsx"
-OUT_DIR = ROOT / "splits"
+VID_DIR = ROOT / "data" / "multiview" / "Medsign" / "archive" / "SignTalk-GH" / "Videos"
+META = ROOT / "data" / "multiview" / "Medsign" / "archive" / "SignTalk-GH" / "Metadata.xlsx"
+OUT_DIR = ROOT / "data" / "splits"
 
 SEED = 42
 TRAIN_FRAC, VAL_FRAC, TESTT_FRAC = 0.80, 0.10, 0.10

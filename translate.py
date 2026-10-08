@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from dataset import SignDataset, feat
 from dataset import SignDatasetVar, feat_var
+from bpe_tokenizer import BPETokenizer
 from model import SignTransformer, SignTransformerV2
 from tokenizer import EOS_ID, SOS_ID, Tokenizer
 
@@ -69,13 +70,16 @@ def main():
     ap.add_argument("--split", default=None)
     ap.add_argument("--beam", type=int, default=0, help="0=greedy, else beam width")
     ap.add_argument("--ckpt", default="best.pt")
+    ap.add_argument("--tokenizer", default=None,
+                    help="tokenizer file (default: from ckpt cfg, else tokenizer.json)")
     ap.add_argument("-o", default=None)
     args = ap.parse_args()
 
     device = get_device()
-    tok = Tokenizer.load()
     ckpt = torch.load(args.ckpt, map_location=device)
     cfg = ckpt["cfg"]
+    TokCls = BPETokenizer if cfg.get("tok_type") == "bpe" else Tokenizer
+    tok = TokCls.load(args.tokenizer or cfg.get("tokenizer", "tokenizer.json"))
     variable = cfg.get("variable", False)
     if variable:
         model = SignTransformerV2(cfg["vocab"],
@@ -88,7 +92,7 @@ def main():
                                 in_dim=cfg.get("in_dim", 225),
                                 enc_layers=cfg.get("enc", 4),
                                 dec_layers=cfg.get("dec", 4)).to(device)
-    model.load_state_dict(ckpt["state"])
+    model.load_state_dict(ckpt["state"], strict=False)  # old ckpts lack ctc_head
     model.eval()
 
     def decode(stem):

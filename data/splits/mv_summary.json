@@ -1,0 +1,18 @@
+{
+  "train": 57498,
+  "val": 2500,
+  "test": 14994,
+  "quarantined": [
+    "train_train_sentence_id_358_358_S2_cam3_rep4",
+    "train_train_sentence_id_358_358_S2_cam3_rep5",
+    "test_test_sentence_id_380_380_S5_cam4_rep4",
+    "test_test_sentence_id_380_380_S5_cam4_rep5",
+    "test_test_sentence_id_380_380_S5_cam4_rep6",
+    "test_test_sentence_id_380_380_S5_cam5_rep1",
+    "test_test_sentence_id_380_380_S5_cam5_rep2",
+    "test_test_sentence_id_380_380_S5_cam5_rep3"
+  ],
+  "val_design": "S4 rep6 all cams (take-holdout, seen signer; optimistic vs S5 signer-holdout test)",
+  "per_sentence_train_takes": "~115",
+  "per_sentence_note": "120 takes/sent in S1-S4 minus 5 val takes (S4 rep6, 5 cams), minus rare quarantined takes"
+}

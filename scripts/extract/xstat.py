@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""One-command extraction status. Usage: .venv312/bin/python xstat.py"""
+"""One-command extraction status. Usage: .venv312/bin/python scripts/extract/xstat.py"""
 import os
 import re
 import subprocess
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(ROOT))
+LOGD = os.path.join(REPO, "logs")
+KPD = os.path.join(REPO, "data", "multiview", "keypoints")
 
 
 def procs():
@@ -20,8 +23,8 @@ def workers():
 
 def tail_bar(log):
     try:
-        with open(os.path.join(ROOT, log), "rb") as f:
-            f.seek(max(0, os.path.getsize(os.path.join(ROOT, log)) - 400))
+        with open(os.path.join(LOGD, log), "rb") as f:
+            f.seek(max(0, os.path.getsize(os.path.join(LOGD, log)) - 400))
             chunk = f.read().decode(errors="replace")
         bars = re.findall(r"(\d+/\d+ \[[\d:]+\<[^\]]+\])", chunk)
         return bars[-1] if bars else "no bar yet"
@@ -29,7 +32,7 @@ def tail_bar(log):
         return "no log"
 
 
-n_new = sum(1 for f in os.listdir(os.path.join(ROOT, "keypoints"))
+n_new = sum(1 for f in os.listdir(KPD)
             if f.endswith(".npz") and "sentence_id_" in f)
 print(f"keypoints (new stems): {n_new} / 75000")
 print(f"mac runs alive: {procs() or 'none'} | workers: {workers()}")

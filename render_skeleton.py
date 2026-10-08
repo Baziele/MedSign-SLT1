@@ -238,7 +238,7 @@ def main():
                          "writes overlay_<stem>.mp4 per input into --out-dir")
     ap.add_argument("--videos-dir", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "Medsign", "archive", "SignTalk-GH", "Videos"))
+        "data", "multiview", "Medsign", "archive", "SignTalk-GH", "Videos"))
     ap.add_argument("--out-dir", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "previews"),
         help="output directory for --overlay mode")

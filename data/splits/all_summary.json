@@ -1,0 +1,14 @@
+{
+  "train": 64835,
+  "val": 3494,
+  "train_GH": 7337,
+  "train_MV": 57498,
+  "val_GH_unseen_text": 994,
+  "val_MV_take_holdout": 2500,
+  "quarantined_npz": 8,
+  "tests_untouched": [
+    "test_T",
+    "test_R",
+    "mv_test"
+  ]
+}
