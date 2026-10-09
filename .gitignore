@@ -23,6 +23,7 @@ data/gsl/
 data/checkpoints/
 models/checkpoints/
 *.pt
+*.zip
 *.npz
 *.npy
 *.mp4
@@ -37,8 +38,17 @@ apk/
 apkwork/
 translation/
 retrieval/vectors.npz
+retrieval/preds_*.csv
+experiments/*.zip
+experiments/**/*.csv
+experiments/**/*.pt
 previews/
 bench/*.log
+bench/*_out/
+bench/kbench_data/
+bench/kbundles/
+bench/kwheels*/
+.impeccable/
 
 # Generated artifacts (reproducible via make_*_splits.py, tokenizer.py;
 # tracked copies stay tracked)
