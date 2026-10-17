@@ -4,12 +4,18 @@ Row dicts carry a `src` tag so every sampler/stat can split by source:
   gh  = original SignTalk hospital sentences (all_train.csv, non-MV stems)
   mv  = Medsign multiview takes (all_train.csv, train_train_/test_test_ stems)
   gsl = GHS dictionary entries (data/gsl/gsl-dictionary/dictionary_clean.csv)
+  jw* = JW continuous chapters, sliced verse/section level. Timing + English
+        text live INSIDE each npz (`verses_json` / `sections_json`: unit rows
+        with start_s/dur_s/text_en). Feature cache = chapter normalized once,
+        then the [start_f, end_f) window saved per unit.
 
 All sampling is index-list based: datasets hold the full pool, and each epoch
 gets a fresh deterministic index list. The exact composition of every epoch is
 logged (pipeline.logkit) so runs are reproducible and paper-reportable.
 """
 import csv
+import json
+import re
 import random
 from pathlib import Path
 
@@ -19,7 +25,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from dataset import FEAT_CACHE, VAR_KINDS, feat_var, augment_var, collate_var
-from preprocess import SPLITS_DIR, clip_features_var
+from preprocess import SPLITS_DIR, clip_features_var, T_MAX
+from preprocess import _interp_missing, normalize as pp_normalize, resample as pp_resample
 
 ROOT = Path(__file__).resolve().parents[1]
 GSL_DIR = ROOT / "data" / "gsl" / "gsl-dictionary"
@@ -67,6 +74,109 @@ def source_of(stem):
     return "mv" if stem.startswith(("train_train_", "test_test_")) else "gh"
 
 
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _clean_text(t):
+    """JW embedded text carries HTML fragments, entity-encoded on top
+    (e.g. &lt;span class=\"verse\"&gt;). Unescape first, THEN strip tags,
+    then unescape again for double-encoded entities; collapse whitespace."""
+    import html
+    s = html.unescape(t or "")
+    s = _TAG.sub(" ", s)
+    return re.sub(r"\s+", " ", html.unescape(s)).strip()
+
+
+# ------------------------------------------------------- JW embedded timers
+
+def _npz_units(npz_path):
+    """(fps, n_frames, [unit dicts]) from one JW npz: verses_json preferred,
+    sections_json fallback — same timed-unit schema (start_s/dur_s/text_en)."""
+    z = np.load(npz_path, allow_pickle=True)
+    blocks = {}
+    for field in ("verses_json", "sections_json"):
+        if field in z:
+            raw = z[field]
+            raw = raw.decode() if hasattr(raw, "decode") else str(raw)
+            try:
+                blocks[field] = json.loads(raw)
+            except json.JSONDecodeError:
+                blocks[field] = []
+    if not blocks:
+        return float(z["fps"]), int(z["n_frames"]), []
+    fps = float(z["fps"])
+    n_frames = int(z["n_frames"])
+    units = []
+    for field, data in blocks.items():
+        for u in data:
+            st, du = float(u.get("start_s", -1)), float(u.get("dur_s", 0))
+            text = _clean_text(u.get("text_en", ""))
+            if st < 0 or du <= 0.2 or not text:
+                continue
+            units.append({"start_s": st, "dur_s": du, "text_en": text})
+    return fps, n_frames, units
+
+
+def load_jw_rows(source="nwt-ghs"):
+    """Slice a JW set's chapters into timed-unit training rows (`src`=source,
+    with jw prefix in slug). Chapter normalized once, [start_f, end_f) sliced.
+    Index cache: data/splits/jw_{source}_index.csv (ignored, fine to delete)."""
+    kpdir = ROOT / "data" / "jw" / source / "keypoints"
+    idx_csv = SPLITS_DIR / f"jw_{source}_index.csv"
+    if idx_csv.exists():
+        with open(idx_csv) as f:
+            return list(csv.DictReader(f))
+    rows = []
+    for p in sorted(kpdir.glob("*.npz")):
+        fps, n_frames, units = _npz_units(p)
+        for i, u in enumerate(units):
+            start_f = int(round(u["start_s"] * fps))
+            end_f = min(int(round((u["start_s"] + u["dur_s"]) * fps)), n_frames)
+            if end_f - start_f < 2:
+                continue
+            rows.append({
+                "stem": f"{source}__{p.stem}__{i:03d}",
+                "chapter": p.stem, "npz": str(p),
+                "start_f": str(start_f), "end_f": str(end_f),
+                "dur_s": f"{u['dur_s']:.2f}", "src": source,
+                "text": u["text_en"],
+            })
+    SPLITS_DIR.mkdir(exist_ok=True)
+    with open(idx_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
+                           ["stem"])
+        w.writeheader()
+        w.writerows(rows)
+    print(f"jw[{source}]: indexed {len(rows)} units from "
+          f"{len(set(r['chapter'] for r in rows))} chapters", flush=True)
+    return rows
+
+
+def chapter_verse_feats(npz, start_f, end_f, kind="face256", t_max=T_MAX):
+    """Feature matrix (Tv, 633) for one JW slice. The chapter is normalized
+    once, then the frame window is cut — per-verse stats would re-run the
+    interp/normalize pipeline per unit for the same video."""
+    from render_skeleton import FACE_VERTS
+
+    z = np.load(npz, allow_pickle=True)
+    face = _interp_missing(z["face_xyz"].astype(np.float64), z["face_present"])
+    pose, hL, hR, face_n, _ = pp_normalize(
+        z["pose_xyz"].astype(np.float64),
+        z["handL_xyz"].astype(np.float64),
+        z["handR_xyz"].astype(np.float64), face, z["pose_present"])
+    hL = np.where(z["handL_present"][:, None, None], hL, 0.0)
+    hR = np.where(z["handR_present"][:, None, None], hR, 0.0)
+    sl = slice(int(start_f), int(end_f))
+    parts = [pose[sl], hL[sl], hR[sl],
+             face_n[sl][:, list(FACE_VERTS)]]
+    n = parts[0].shape[0]
+    if n > t_max:
+        parts = [pp_resample(p, t_max) for p in parts]
+    feats = np.concatenate(parts, axis=1)
+    feats = np.where(np.isfinite(feats), feats, 0.0).astype(np.float32)
+    return feats.reshape(len(feats), -1)
+
+
 # ------------------------------------------------------------- feature access
 
 def kp_dir_for(row):
@@ -77,11 +187,16 @@ def kp_dir_for(row):
 
 def feat_any(row, kind="face256", t_max=256):
     """dataset.feat_var with per-source kp dirs. Cache layout is shared with
-    dataset.py so stage-2 training never recomputes what stage-1 already saw."""
+    dataset.py so stage-2 training never recomputes what stage-1 already saw.
+    JW verse rows need their cache prebuilt (build_jw_cache.py): inline
+    computation would reload + renormalize a whole chapter per verse."""
     cache = FEAT_CACHE[kind]
     p = cache / f"{row['stem']}.npy"
     if p.exists():
         return np.load(p)
+    if "start_f" in row:
+        raise RuntimeError(
+            f"missing JW cache {p.name}; run scripts/data_tools/build_jw_cache.py first")
     kp = kp_dir_for(row)
     if kp is None:
         return feat_var(row["stem"], kind)
@@ -121,10 +236,10 @@ def build_groups(rows):
 
 def groups_by_src(rows, groups):
     """Split group keys by source (mixed-source groups don't occur: each
-    text lives in exactly one of gh/mv/gsl)."""
-    out = {"gh": [], "mv": [], "gsl": []}
+    text lives in exactly one of gh/mv/gsl/jw*)."""
+    out = {}
     for key, idx in groups.items():
-        out[rows[idx[0]]["src"]].append(key)
+        out.setdefault(rows[idx[0]]["src"], []).append(key)
     return out
 
 
@@ -159,11 +274,11 @@ def mix_index(rows, groups, n_target, fractions, rng):
 
 
 def stage2_index(rows, groups, mv_takes, rng):
-    """Stage-2 epoch: ALL gh rows + mv sampled as strikes-per-unique-sentence
-    (`mv_takes` random takes per mv text group). gsl is never a CE target."""
-    idx = [i for i, r in enumerate(rows) if r["src"] == "gh"]
-    gsrc = groups_by_src(rows, groups)["mv"]
-    for key in gsrc:
+    """Stage-2 epoch: every gh AND jw verse row (JW is the main training
+    source) + mv capped at `mv_takes` takes per unique sentence. gsl is never
+    a CE target."""
+    idx = [i for i, r in enumerate(rows) if r["src"] != "mv"]
+    for key in groups_by_src(rows, groups).get("mv", []):
         pool = groups[key]
         k = min(mv_takes, len(pool))
         idx += rng.sample(pool, k)
@@ -173,9 +288,10 @@ def stage2_index(rows, groups, mv_takes, rng):
 
 def index_stats(rows, idx):
     """Source composition of one epoch's index list (for logs / paper)."""
-    out = {"gh": 0, "mv": 0, "gsl": 0}
+    out = {}
     for i in idx:
-        out[rows[i]["src"]] += 1
+        s = rows[i]["src"]
+        out[s] = out.get(s, 0) + 1
     return out
 
 

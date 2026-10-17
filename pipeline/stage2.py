@@ -81,6 +81,10 @@ def main():
     ap.add_argument("--warmup-steps", type=int, default=1000)
     ap.add_argument("--mv-takes", type=int, default=4,
                     help="multiview takes per unique sentence per epoch (cap)")
+    ap.add_argument("--no-jw", action="store_true",
+                    help="exclude JW verse data (main source by default)")
+    ap.add_argument("--jw-source", default="nwt-ghs",
+                    help="which JW set to index as the main source")
     ap.add_argument("--tokenizer", default="bpe_all_8k.json.wrap")
     ap.add_argument("--ctc-weight", type=float, default=0.3)
     ap.add_argument("--sched-samp", type=float, default=0.8)
@@ -108,14 +112,20 @@ def main():
 
     # ---- data -------------------------------------------------------------
     train_rows = D.load_main_rows("all_train")
+    jw_rows = [] if args.no_jw else D.load_jw_rows(args.jw_source)
+    pool_rows = train_rows + jw_rows
     val_rows = D.load_main_rows("all_val")
-    train_groups = D.build_groups(train_rows)
-    gsrc = D.groups_by_src(train_rows, train_groups)
+    train_groups = D.build_groups(pool_rows)
+    gsrc = D.groups_by_src(pool_rows, train_groups)
+    src_by_stem = {r["stem"]: r["src"] for r in pool_rows}
     val_groups = D.build_groups(val_rows)
-    lens_all = [D.len_of(r, args.kind) for r in train_rows]
-    print(f"data: gh {len(gsrc['gh'])} texts/{sum(len(train_groups[k]) for k in gsrc['gh'])} rows"
-          f" | mv {len(gsrc['mv'])} texts/{sum(len(train_groups[k]) for k in gsrc['mv'])} rows"
-          f" | val {len(val_rows)} rows/{len(val_groups)} texts", flush=True)
+    lens_all = [D.len_of(r, args.kind) for r in train_rows] + \
+               [D.len_of(r, args.kind) for r in jw_rows]
+    src_line = " | ".join(
+        f"{s} {sum(1 for r in pool_rows if r['src'] == s)} rows/"
+        f"{len(gsrc.get(s, []))} texts" for s in sorted({r['src'] for r in pool_rows}))
+    print(f"data: {src_line} | val {len(val_rows)} rows/{len(val_groups)} texts",
+          flush=True)
 
     model = SignTransformerV2(len(tok), in_dim=KIND_DIM[args.kind],
                               d_model=args.d_model,
@@ -141,8 +151,8 @@ def main():
     ctc_crit = (nn.CTCLoss(blank=PAD_ID, zero_infinity=True)
                 if args.ctc_weight > 0 else None)
 
-    gh_row_n = sum(len(train_groups[k]) for k in gsrc["gh"])
-    mv_row_n = args.mv_takes * len(gsrc["mv"])
+    gh_row_n = sum(len(train_groups[k]) for k in gsrc.get("gh", []))
+    mv_row_n = args.mv_takes * len(gsrc.get("mv", []))
     total_steps = args.epochs * ((gh_row_n + mv_row_n) // args.batch + 1)
     sched = None
     if args.warmup_steps > 0:
@@ -180,6 +190,9 @@ def main():
                 "train_rows": {s: sum(len(train_groups[k]) for k in gsrc[s])
                                for s in gsrc},
                 "mv_takes_per_epoch": args.mv_takes,
+                "jw_source": None if args.no_jw else args.jw_source,
+                "jw_rows": {s: sum(1 for r in jw_rows if r["src"] == s)
+                            for s in {r["src"] for r in jw_rows}},
                 "val_rows": len(val_rows), "val_texts": len(val_groups)}
     rl = RunLog(f"stage2_{args.tag}", cfg, extra=manifest)
     ep_cols = ["ep", "clock", "train_s", "val_s", "tr_loss", "tr_acc",
@@ -216,13 +229,13 @@ def main():
     for ep in range(start_ep, args.epochs + 1):
         # ---- per-epoch controlled mix -------------------------------------
         rng = random.Random(args.seed * 1000 + ep)
-        idx = D.stage2_index(train_rows, train_groups, args.mv_takes, rng)
-        mix = D.index_stats(train_rows, idx)
+        idx = D.stage2_index(pool_rows, train_groups, args.mv_takes, rng)
+        mix = D.index_stats(pool_rows, idx)
         if args.limit_clips:
             rng.shuffle(idx)
             idx = idx[:args.limit_clips]
-            mix = D.index_stats(train_rows, idx)
-        ep_rows = [train_rows[i] for i in idx]
+            mix = D.index_stats(pool_rows, idx)
+        ep_rows = [pool_rows[i] for i in idx]
         ep_lens = [lens_all[i] for i in idx]
         ds = D.VarRowDataset(ep_rows, tok, kind=args.kind, augment_flag=True)
         train_batches = D.bucketed_batches(ds, ep_lens, args.batch,
@@ -277,7 +290,7 @@ def main():
                 el = time.time() - t0
                 bs = {}
                 for s in b["stems"]:
-                    src_tag = D.source_of(s)
+                    src_tag = src_by_stem.get(s, "?")
                     bs[src_tag] = bs.get(src_tag, 0) + 1
                 rl.step({"ep": ep, "batch": i, "loss": tot / max(1, ntok),
                          "ctc": ctc_tot / max(1, ctc_n) if ctc_n else None,
@@ -314,7 +327,8 @@ def main():
                   f"{lr_now:.3e}", f"{opt.param_groups[0]['lr']:.3e}",
                   f"{gsum/max(1,nb):.3f}", f"{gmax:.3f}", nb,
                   f"{ntok/train_s:.0f}", best_ep])
-        line = (f"ep {ep}/{args.epochs} | mix gh {mix['gh']}+mv {mix['mv']} | "
+        mixstr = " + ".join(f"{k} {v}" for k, v in sorted(mix.items()))
+        line = (f"ep {ep}/{args.epochs} | mix {mixstr} | "
                 f"train {tot/max(1,ntok):.2f} | val {vm['loss']:.2f} | "
                 f"BLEU {vm['val_bleu']:.1f} (s5 {s5:.1f}) gh "
                 f"{vm['bleu_gh']:.1f} mv {vm['bleu_mv']:.1f} | "
