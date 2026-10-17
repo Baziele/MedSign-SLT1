@@ -61,9 +61,14 @@ def encode_pool(model, rows, tok, device, kind, batch=64):
     return torch.cat(V), torch.cat(T), texts, stems
 
 
-def make_collate(tok):
-    """Pads src/src2 to local max and tokenizes the batch texts."""
-    def _collate(batch):
+class PairCollator:
+    """Module-level (picklable under macOS spawn): pads src/src2 to local max
+    and tokenizes the batch texts with the HF tokenizer."""
+
+    def __init__(self, tok):
+        self.tok = tok
+
+    def __call__(self, batch):
         lens = torch.tensor([len(b["src"]) for b in batch])
         lens2 = torch.tensor([len(b["src2"]) for b in batch])
         src = torch.nn.utils.rnn.pad_sequence([b["src"] for b in batch],
@@ -72,13 +77,12 @@ def make_collate(tok):
                                                batch_first=True)
         smask = torch.arange(src.size(1)).unsqueeze(0) >= lens.unsqueeze(1)
         s2mask = torch.arange(src2.size(1)).unsqueeze(0) >= lens2.unsqueeze(1)
-        toks = tok([b["text"] for b in batch], padding=True, truncation=True,
-                   max_length=48, return_tensors="pt")
+        toks = self.tok([b["text"] for b in batch], padding=True,
+                        truncation=True, max_length=48, return_tensors="pt")
         return {**toks, "src": src, "src2": src2, "src_mask": smask,
                 "src2_mask": s2mask,
                 "texts": [b["text"] for b in batch],
                 "stems": [b["stem"] for b in batch]}
-    return _collate
 
 
 def main():
@@ -201,7 +205,7 @@ def main():
                 f"{args.vv_weight} {n_params/1e6:.1f}M params -> "
                 f"{best_pt.name}")
 
-    collate = make_collate(tok)
+    collate = PairCollator(tok)
     t_run, step = time.time(), 0
     for ep in range(start_ep, args.epochs + 1):
         rng = random.Random(args.seed * 1000 + ep)
