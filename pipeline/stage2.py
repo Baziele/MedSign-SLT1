@@ -83,8 +83,9 @@ def main():
                     help="multiview takes per unique sentence per epoch (cap)")
     ap.add_argument("--no-jw", action="store_true",
                     help="exclude JW verse data (main source by default)")
-    ap.add_argument("--jw-source", default="nwt-ghs",
-                    help="which JW set to index as the main source")
+    ap.add_argument("--jw-source", default="nwt-ghs,mwb,lfb",
+                    help="comma list of JW sets. nwt-nns is Nigerian SL and "
+                         "is deliberately NOT a default (phase-2 asset)")
     ap.add_argument("--tokenizer", default="bpe_all_8k.json.wrap")
     ap.add_argument("--ctc-weight", type=float, default=0.3)
     ap.add_argument("--sched-samp", type=float, default=0.8)
@@ -112,7 +113,8 @@ def main():
 
     # ---- data -------------------------------------------------------------
     train_rows = D.load_main_rows("all_train")
-    jw_rows = [] if args.no_jw else D.load_jw_rows(args.jw_source)
+    jw_sources = [s.strip() for s in args.jw_source.split(",") if s.strip()]
+    jw_rows = [] if args.no_jw else D.load_jw_rows(jw_sources)
     pool_rows = train_rows + jw_rows
     val_rows = D.load_main_rows("all_val")
     train_groups = D.build_groups(pool_rows)
@@ -190,7 +192,7 @@ def main():
                 "train_rows": {s: sum(len(train_groups[k]) for k in gsrc[s])
                                for s in gsrc},
                 "mv_takes_per_epoch": args.mv_takes,
-                "jw_source": None if args.no_jw else args.jw_source,
+                "jw_source": None if args.no_jw else jw_sources,
                 "jw_rows": {s: sum(1 for r in jw_rows if r["src"] == s)
                             for s in {r["src"] for r in jw_rows}},
                 "val_rows": len(val_rows), "val_texts": len(val_groups)}

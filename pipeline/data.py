@@ -80,76 +80,94 @@ _TAG = re.compile(r"<[^>]+>")
 def _clean_text(t):
     """JW embedded text carries HTML fragments, entity-encoded on top
     (e.g. &lt;span class=\"verse\"&gt;). Unescape first, THEN strip tags,
-    then unescape again for double-encoded entities; collapse whitespace."""
+    then unescape again for double-encoded entities; collapse whitespace.
+    Also strips trailing lesson-locate digit lists (>=2 trailing integers:
+    'Anger is dangerous 4, 12, 41, 49' -> 'Anger is dangerous') — these are
+    page pointers, not signed content."""
     import html
     s = html.unescape(t or "")
     s = _TAG.sub(" ", s)
-    return re.sub(r"\s+", " ", html.unescape(s)).strip()
+    s = html.unescape(s)
+    s = re.sub(r"(?:\s(?:and\s+)?\d{1,3}){2,}[.,;:!]*\s*$", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
-# ------------------------------------------------------- JW embedded timers
+_MIN_WORDS = 3  # drops 'October 13-19'-style section headers
+
 
 def _npz_units(npz_path):
     """(fps, n_frames, [unit dicts]) from one JW npz: verses_json preferred,
     sections_json fallback — same timed-unit schema (start_s/dur_s/text_en)."""
     z = np.load(npz_path, allow_pickle=True)
-    blocks = {}
-    for field in ("verses_json", "sections_json"):
+    data = []
+    for field in ("verses_json", "sections_json"):  # first that parses wins
         if field in z:
             raw = z[field]
             raw = raw.decode() if hasattr(raw, "decode") else str(raw)
             try:
-                blocks[field] = json.loads(raw)
+                data = json.loads(raw)
             except json.JSONDecodeError:
-                blocks[field] = []
-    if not blocks:
+                data = []
+            if data:
+                break
+    if not data:
         return float(z["fps"]), int(z["n_frames"]), []
     fps = float(z["fps"])
     n_frames = int(z["n_frames"])
     units = []
-    for field, data in blocks.items():
-        for u in data:
-            st, du = float(u.get("start_s", -1)), float(u.get("dur_s", 0))
-            text = _clean_text(u.get("text_en", ""))
-            if st < 0 or du <= 0.2 or not text:
-                continue
-            units.append({"start_s": st, "dur_s": du, "text_en": text})
+    for pos, u in enumerate(data):
+        st, du = float(u.get("start_s", -1)), float(u.get("dur_s", 0))
+        text = _clean_text(u.get("text_en", ""))
+        if st < 0 or du <= 0.2 or not text:
+            continue
+        if len(text.split()) < _MIN_WORDS:
+            continue
+        u["pos"] = pos  # raw position = stable cache name, filter-proof
+        units.append(u)
     return fps, n_frames, units
 
 
-def load_jw_rows(source="nwt-ghs"):
-    """Slice a JW set's chapters into timed-unit training rows (`src`=source,
-    with jw prefix in slug). Chapter normalized once, [start_f, end_f) sliced.
-    Index cache: data/splits/jw_{source}_index.csv (ignored, fine to delete)."""
-    kpdir = ROOT / "data" / "jw" / source / "keypoints"
-    idx_csv = SPLITS_DIR / f"jw_{source}_index.csv"
-    if idx_csv.exists():
-        with open(idx_csv) as f:
-            return list(csv.DictReader(f))
-    rows = []
-    for p in sorted(kpdir.glob("*.npz")):
-        fps, n_frames, units = _npz_units(p)
-        for i, u in enumerate(units):
-            start_f = int(round(u["start_s"] * fps))
-            end_f = min(int(round((u["start_s"] + u["dur_s"]) * fps)), n_frames)
-            if end_f - start_f < 2:
-                continue
-            rows.append({
-                "stem": f"{source}__{p.stem}__{i:03d}",
-                "chapter": p.stem, "npz": str(p),
-                "start_f": str(start_f), "end_f": str(end_f),
-                "dur_s": f"{u['dur_s']:.2f}", "src": source,
-                "text": u["text_en"],
-            })
-    SPLITS_DIR.mkdir(exist_ok=True)
-    with open(idx_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
-                           ["stem"])
-        w.writeheader()
-        w.writerows(rows)
-    print(f"jw[{source}]: indexed {len(rows)} units from "
-          f"{len(set(r['chapter'] for r in rows))} chapters", flush=True)
-    return rows
+def load_jw_rows(sources=("nwt-ghs",)):
+    """Slice JW set(s)' chapters into timed-unit training rows (`src`=source
+    slug). Chapter normalized once, [start_f, end_f) sliced. Index cache:
+    data/splits/jw_{source}_index.csv (ignored, fine to delete)."""
+    if isinstance(sources, str):
+        sources = [sources]
+    out = []
+    for source in sources:
+        kpath = ROOT / "data" / "jw" / source / "keypoints"
+        idx_csv = SPLITS_DIR / f"jw_{source}_index.csv"
+        if idx_csv.exists():
+            with open(idx_csv) as f:
+                rows = list(csv.DictReader(f))
+        else:
+            rows = []
+            for p in sorted(kpath.glob("*.npz")):
+                fps, n_frames, units = _npz_units(p)
+                for u in units:
+                    start_f = int(round(u["start_s"] * fps))
+                    end_f = min(int(round((u["start_s"] + u["dur_s"]) * fps)),
+                                n_frames)
+                    if end_f - start_f < 2:
+                        continue
+                    rows.append({
+                        "stem": f"{source}__{p.stem}__{u['pos']:03d}",
+                        "chapter": p.stem, "npz": str(p),
+                        "start_f": str(start_f), "end_f": str(end_f),
+                        "dur_s": f"{u['dur_s']:.2f}", "src": source,
+                        "text": u["text_en"],
+                    })
+            SPLITS_DIR.mkdir(exist_ok=True)
+            with open(idx_csv, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows
+                                   else ["stem"])
+                w.writeheader()
+                w.writerows(rows)
+            print(f"jw[{source}]: indexed {len(rows)} units from "
+                  f"{len(set(r['chapter'] for r in rows))} chapters",
+                  flush=True)
+        out.extend(rows)
+    return out
 
 
 def chapter_verse_feats(npz, start_f, end_f, kind="face256", t_max=T_MAX):
