@@ -14,6 +14,7 @@ gets a fresh deterministic index list. The exact composition of every epoch is
 logged (pipeline.logkit) so runs are reproducible and paper-reportable.
 """
 import csv
+import hashlib
 import json
 import re
 import random
@@ -79,8 +80,11 @@ _TAG = re.compile(r"<[^>]+>")
 
 def _clean_text(t):
     """JW embedded text carries HTML fragments, entity-encoded on top
-    (e.g. &lt;span class=\"verse\"&gt;). Unescape first, THEN strip tags,
-    then unescape again for double-encoded entities; collapse whitespace.
+    (e.g. &lt;span class=\"verse\"&gt;), sometimes truncated mid-tag by the
+    extractor and never closed (e.g. 'earth. <span class=\"verse\"').
+    Unescape first, THEN strip tags, then unescape again for double-encoded
+    entities; any '<' with no '>' after it is a dangling truncated tag —
+    drop it and everything it swallowed. Collapses whitespace.
     Also strips trailing lesson-locate digit lists (>=2 trailing integers:
     'Anger is dangerous 4, 12, 41, 49' -> 'Anger is dangerous') — these are
     page pointers, not signed content."""
@@ -88,6 +92,10 @@ def _clean_text(t):
     s = html.unescape(t or "")
     s = _TAG.sub(" ", s)
     s = html.unescape(s)
+    s = _TAG.sub(" ", s)
+    lt = s.rfind("<")  # dangling truncated tag: no closing '>' after it
+    if lt != -1 and ">" not in s[lt:]:
+        s = s[:lt]
     s = re.sub(r"(?:\s(?:and\s+)?\d{1,3}){2,}[.,;:!]*\s*$", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -123,8 +131,33 @@ def _npz_units(npz_path):
         if len(text.split()) < _MIN_WORDS:
             continue
         u["pos"] = pos  # raw position = stable cache name, filter-proof
+        u["text_en"] = text  # store the cleaned text, not the raw fragment
         units.append(u)
     return fps, n_frames, units
+
+
+def split_jw(rows, val_frac=0.03, test_frac=0.03):
+    """Deterministic chapter-level holdout: order chapters by content hash and
+    hand out the first slice as test, next as val, rest train. Chapter-level
+    (not verse-level) so no signer/content leakage across splits, and pure
+    md5 ordering so every run/process sees identical splits without a state
+    file. Adds a `split` column to each row in place."""
+    chapters = sorted(set(r["chapter"] for r in rows))
+    ranked = sorted(chapters,
+                    key=lambda c: hashlib.md5(f"jwsplit|{c}".encode())
+                    .hexdigest())
+    n_test = round(len(ranked) * test_frac)
+    n_val = round(len(ranked) * val_frac)
+    test = set(ranked[:n_test])
+    val = set(ranked[n_test:n_test + n_val])
+    for r in rows:
+        r["split"] = ("test" if r["chapter"] in test else
+                      "val" if r["chapter"] in val else "train")
+    c = {s: sum(1 for r in rows if r["split"] == s) for s in
+         ("train", "val", "test")}
+    print(f"jw split: {c} (chapter-level, {len(chapters)} chapters)",
+          flush=True)
+    return rows
 
 
 def load_jw_rows(sources=("nwt-ghs",)):
@@ -140,23 +173,39 @@ def load_jw_rows(sources=("nwt-ghs",)):
         if idx_csv.exists():
             with open(idx_csv) as f:
                 rows = list(csv.DictReader(f))
+            # self-heal: GPU-cached index may predate a text-cleaner fix —
+            # cleaning is idempotent and costs nothing at load time
+            for r in rows:
+                r["text"] = _clean_text(r["text"])
         else:
             rows = []
+            n_dropped = 0
             for p in sorted(kpath.glob("*.npz")):
                 fps, n_frames, units = _npz_units(p)
+                if not units:
+                    continue
+                zt = np.load(p, allow_pickle=True)  # trim metadata (cheap)
                 for u in units:
                     start_f = int(round(u["start_s"] * fps))
-                    end_f = min(int(round((u["start_s"] + u["dur_s"]) * fps)),
-                                n_frames)
+                    end_f = int(round((u["start_s"] + u["dur_s"]) * fps))
                     if end_f - start_f < 2:
                         continue
+                    m = _map_window_z(zt, start_f, end_f)
+                    if m is None:  # unit has no usable kept footage
+                        n_dropped += 1
+                        continue
+                    a_lo, a_hi = m
                     rows.append({
                         "stem": f"{source}__{p.stem}__{u['pos']:03d}",
                         "chapter": p.stem, "npz": str(p),
                         "start_f": str(start_f), "end_f": str(end_f),
+                        "a_lo": str(a_lo), "a_hi": str(a_hi),
                         "dur_s": f"{u['dur_s']:.2f}", "src": source,
                         "text": u["text_en"],
                     })
+            if n_dropped:
+                print(f"jw[{source}]: dropped {n_dropped} units with no "
+                      f"usable kept footage (trim cut them off)", flush=True)
             SPLITS_DIR.mkdir(exist_ok=True)
             with open(idx_csv, "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows
@@ -166,17 +215,59 @@ def load_jw_rows(sources=("nwt-ghs",)):
             print(f"jw[{source}]: indexed {len(rows)} units from "
                   f"{len(set(r['chapter'] for r in rows))} chapters",
                   flush=True)
+        rows = split_jw(rows)
         out.extend(rows)
     return out
 
 
-def chapter_verse_feats(npz, start_f, end_f, kind="face256", t_max=T_MAX):
+def _map_window_z(z, start_f, end_f):
+    """Map absolute video frames -> array indices for a possibly-trimmed
+    chapter npz. Trims happen at EXTRACTION time, so npz arrays start above
+    absolute frame 0: mwb stores start_frame/skip_seconds (intro cut), lfb
+    stores frame_idx = kept original frame numbers (head cut; interior gaps
+    possible if ranges were dropped), nwt-ghs has neither (identity).
+    Ignoring this had sliced every mwb/lfb cache ~one cut-length late.
+    Used BOTH at index time (drop un-mappable units) and at slice time.
+    Returns (a_lo, a_hi) half-open array indices, or None if the unit has
+    essentially no kept footage."""
+    if "frame_idx" in z:
+        fi = np.asarray(z["frame_idx"], dtype=np.int64)
+        a_lo = int(np.searchsorted(fi, start_f, side="left"))
+        a_hi = int(np.searchsorted(fi, end_f, side="left"))
+        requested = end_f - start_f
+        if a_hi <= a_lo or a_hi - a_lo < 2:
+            return None
+        covered = int(fi[a_hi - 1]) - int(fi[a_lo]) + 1
+        if covered < 0.5 * requested:  # unit mostly inside a dropped range
+            return None
+        return a_lo, a_hi
+    off = int(z["start_frame"]) if "start_frame" in z else 0
+    n = int(z["n_frames"]) if "n_frames" in z else 1 << 30
+    a_lo, a_hi = start_f - off, min(end_f - off, n)
+    if a_lo < 0 or a_hi - a_lo < 2:
+        return None
+    return a_lo, a_hi
+
+
+def _map_window(npz, start_f, end_f):
+    return _map_window_z(np.load(npz, allow_pickle=True), start_f, end_f)
+
+
+def chapter_verse_feats(npz, start_f, end_f, a_lo=None, a_hi=None,
+                        kind="face256", t_max=T_MAX):
     """Feature matrix (Tv, 633) for one JW slice. The chapter is normalized
     once, then the frame window is cut — per-verse stats would re-run the
-    interp/normalize pipeline per unit for the same video."""
+    interp/normalize pipeline per unit for the same video. a_lo/a_hi are the
+    ARRAY indices pre-mapped by _map_window at index time; when omitted the
+    absolute frames are mapped here instead."""
     from render_skeleton import FACE_VERTS
 
     z = np.load(npz, allow_pickle=True)
+    if a_lo is None or a_hi is None:
+        m = _map_window_z(z, start_f, end_f)
+        if m is None:
+            return None
+        a_lo, a_hi = m
     face = _interp_missing(z["face_xyz"].astype(np.float64), z["face_present"])
     pose, hL, hR, face_n, _ = pp_normalize(
         z["pose_xyz"].astype(np.float64),
@@ -184,7 +275,7 @@ def chapter_verse_feats(npz, start_f, end_f, kind="face256", t_max=T_MAX):
         z["handR_xyz"].astype(np.float64), face, z["pose_present"])
     hL = np.where(z["handL_present"][:, None, None], hL, 0.0)
     hR = np.where(z["handR_present"][:, None, None], hR, 0.0)
-    sl = slice(int(start_f), int(end_f))
+    sl = slice(int(a_lo), int(a_hi))
     parts = [pose[sl], hL[sl], hR[sl],
              face_n[sl][:, list(FACE_VERTS)]]
     n = parts[0].shape[0]
@@ -266,18 +357,25 @@ def groups_by_src(rows, groups):
 def mix_index(rows, groups, n_target, fractions, rng):
     """One epoch's index list: `n_target` slots, each slot samples a source
     by fraction, a text group uniformly within the source, and a take
-    uniformly within the group. Fractions are relative; gh gets the remainder.
-    Repeats are identical-sampling (new take each time), so every appearance
-    of a text stays visually fresh while text exposure stays balanced."""
+    uniformly within the group. Fractions: gh gets the remainder; a special
+    'jw' share is spread evenly across every jw* source present. Repeats are
+    identical-sampling (new take each time), so every appearance of a text
+    stays visually fresh while text exposure stays balanced."""
     gsrc = groups_by_src(rows, groups)
-    weights = {"gh": max(0.0, 1.0 - fractions["mv"] - fractions["gsl"]),
-               "mv": fractions["mv"], "gsl": fractions["gsl"]}
-    # uniform group choice within each source
+    weights = {"gh": max(0.0, 1.0 - sum(fractions.values()))}
+    for s, f in fractions.items():
+        weights[s] = f
     picks = {s: [] for s in weights}
+    jw_keys = []
     for s, keys in gsrc.items():
-        if weights[s] > 0 and keys:
-            picks[s] = keys
-    eff = {s: w for s, w in weights.items() if picks[s]}
+        if s in ("gh", "mv", "gsl"):
+            if weights.get(s, 0) > 0 and keys:
+                picks[s] = keys
+        else:
+            jw_keys += keys
+    if jw_keys and weights.get("jw", 0) > 0:
+        picks["jw"] = jw_keys
+    eff = {s: w for s, w in weights.items() if picks.get(s) and w > 0}
     tot = sum(eff.values())
     srcs = list(eff)
     probs = [eff[s] / tot for s in srcs]

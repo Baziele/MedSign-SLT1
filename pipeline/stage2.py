@@ -115,14 +115,15 @@ def main():
     train_rows = D.load_main_rows("all_train")
     jw_sources = [s.strip() for s in args.jw_source.split(",") if s.strip()]
     jw_rows = [] if args.no_jw else D.load_jw_rows(jw_sources)
-    pool_rows = train_rows + jw_rows
+    jw_train = [r for r in jw_rows if r["split"] == "train"]
+    jw_val_rows = [r for r in jw_rows if r["split"] == "val"]
+    pool_rows = train_rows + jw_train
     val_rows = D.load_main_rows("all_val")
     train_groups = D.build_groups(pool_rows)
     gsrc = D.groups_by_src(pool_rows, train_groups)
     src_by_stem = {r["stem"]: r["src"] for r in pool_rows}
     val_groups = D.build_groups(val_rows)
-    lens_all = [D.len_of(r, args.kind) for r in train_rows] + \
-               [D.len_of(r, args.kind) for r in jw_rows]
+    lens_all = [D.len_of(r, args.kind) for r in pool_rows]
     src_line = " | ".join(
         f"{s} {sum(1 for r in pool_rows if r['src'] == s)} rows/"
         f"{len(gsrc.get(s, []))} texts" for s in sorted({r['src'] for r in pool_rows}))
@@ -155,7 +156,12 @@ def main():
 
     gh_row_n = sum(len(train_groups[k]) for k in gsrc.get("gh", []))
     mv_row_n = args.mv_takes * len(gsrc.get("mv", []))
-    total_steps = args.epochs * ((gh_row_n + mv_row_n) // args.batch + 1)
+    jw_row_n = sum(1 for r in pool_rows if r["src"].startswith(
+        ("nwt-", "mwb", "lfb")))
+    # schedule must budget EVERY row the epoch actually serves, jw included,
+    # or the cosine decays to ~0 LR mid-run (jw is ~45% of each epoch)
+    total_steps = args.epochs * ((gh_row_n + mv_row_n + jw_row_n)
+                                 // args.batch + 1)
     sched = None
     if args.warmup_steps > 0:
         from torch.optim.lr_scheduler import (CosineAnnealingLR, LinearLR,
@@ -174,6 +180,15 @@ def main():
                                      shuffle=False)
     val_loader = DataLoader(val_ds, batch_sampler=val_batches,
                             collate_fn=collate_var, num_workers=2)
+    if jw_val_rows:
+        jw_val_ds = D.VarRowDataset(jw_val_rows, tok, kind=args.kind)
+        jw_val_lens = [D.len_of(r, args.kind) for r in jw_val_rows]
+        jw_val_loader = DataLoader(
+            jw_val_ds, batch_sampler=D.bucketed_batches(
+                jw_val_ds, jw_val_lens, args.batch, shuffle=False),
+            collate_fn=collate_var, num_workers=2)
+    else:
+        jw_val_loader = None
 
     cfg = {"vocab": len(tok), "kind": args.kind,
                        "in_dim": KIND_DIM[args.kind],
@@ -193,14 +208,18 @@ def main():
                                for s in gsrc},
                 "mv_takes_per_epoch": args.mv_takes,
                 "jw_source": None if args.no_jw else jw_sources,
-                "jw_rows": {s: sum(1 for r in jw_rows if r["src"] == s)
-                            for s in {r["src"] for r in jw_rows}},
+                "jw_split_rows": {sh: {s: sum(1 for r in jw_rows
+                                              if r["src"] == s and
+                                              r["split"] == sh)
+                                       for s in {r["src"] for r in jw_rows}}
+                                  for sh in ("train", "val", "test")},
                 "val_rows": len(val_rows), "val_texts": len(val_groups)}
     rl = RunLog(f"stage2_{args.tag}", cfg, extra=manifest)
     ep_cols = ["ep", "clock", "train_s", "val_s", "tr_loss", "tr_acc",
                "ctc", "ctc_skip", "samp_p", "val_loss", "val_acc",
                "val_bleu", "val_bleu_s5", "exact_n", "exact_frac",
                "bleu_gh", "exact_gh", "n_gh", "bleu_mv", "exact_mv", "n_mv",
+               "bleu_jw", "n_jw",
                "lr", "lr_pose", "grad_avg", "grad_max", "n_batches",
                "tok_s", "best_ep"]
     fresh_log = not (args.resume and (rl.dir / "epochs.csv").exists())
@@ -304,6 +323,9 @@ def main():
         train_s = time.time() - t0
 
         vm = val_metrics(model, val_loader, tok, device, True, crit)
+        vmjw = val_metrics(model, jw_val_loader, tok, device, True, crit)
+        if jw_val_loader is None:
+            vmjw = {"val_bleu": -1.0, "exact": 0, "n": 0}
         bleu_hist.append(vm["val_bleu"])
         s5 = sum(bleu_hist[-5:]) / min(5, len(bleu_hist))
         lr_now = opt.param_groups[1]["lr"]
@@ -326,6 +348,7 @@ def main():
                   f"{vm['exact']/max(1,vm['n']):.4f}",
                   f"{vm['bleu_gh']:.2f}", vm["exact_gh"], vm["n_gh"],
                   f"{vm['bleu_mv']:.2f}", vm["exact_mv"], vm["n_mv"],
+                  f"{vmjw['val_bleu']:.2f}", vmjw["n"],
                   f"{lr_now:.3e}", f"{opt.param_groups[0]['lr']:.3e}",
                   f"{gsum/max(1,nb):.3f}", f"{gmax:.3f}", nb,
                   f"{ntok/train_s:.0f}", best_ep])
@@ -333,7 +356,8 @@ def main():
         line = (f"ep {ep}/{args.epochs} | mix {mixstr} | "
                 f"train {tot/max(1,ntok):.2f} | val {vm['loss']:.2f} | "
                 f"BLEU {vm['val_bleu']:.1f} (s5 {s5:.1f}) gh "
-                f"{vm['bleu_gh']:.1f} mv {vm['bleu_mv']:.1f} | "
+                f"{vm['bleu_gh']:.1f} mv {vm['bleu_mv']:.1f} jw "
+                f"{vmjw['val_bleu']:.1f} | "
                 f"exact {vm['exact']}/{vm['n']} | "
                 f"best {best:.1f} ({bad} back) | {ep_s/60:.0f}m/ep | "
                 f"~{done_at.strftime('%a %H:%M')} ({left_h:.1f}h left)"

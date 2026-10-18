@@ -99,6 +99,11 @@ def main():
                     help="share of epoch slots from multiview text groups")
     ap.add_argument("--gsl-frac", type=float, default=0.1,
                     help="share of epoch slots from GHS dictionary (capped)")
+    ap.add_argument("--jw-frac", type=float, default=0.25,
+                    help="share of epoch slots from JW verse/section texts "
+                         "(spread across the loaded jw sources)")
+    ap.add_argument("--jw-source", default="nwt-ghs,mwb,lfb",
+                    help="comma list of JW sets (train split only)")
     ap.add_argument("--vv-weight", type=float, default=0.1,
                     help="SignCL video-video anti-density weight")
     ap.add_argument("--text-model", default="facebook/bart-base")
@@ -126,10 +131,15 @@ def main():
     # ---- data pools -----------------------------------------------------
     main_rows = D.load_main_rows("all_train")
     gsl_rows = D.load_gsl_rows()
-    rows = main_rows + gsl_rows
+    jw_sources = [s.strip() for s in args.jw_source.split(",") if s.strip()]
+    jw_rows = [] if args.jw_frac <= 0 else [
+        r for r in D.load_jw_rows(jw_sources) if r["split"] == "train"]
+    rows = main_rows + gsl_rows + jw_rows
     groups = D.build_groups(rows)
     gsrc = D.groups_by_src(rows, groups)
     val_rows = D.load_main_rows("all_val")
+    jw_val = [] if args.jw_frac <= 0 else [
+        r for r in D.load_jw_rows(jw_sources) if r["split"] == "val"]
     val_groups = D.build_groups(val_rows)
     lens_all = [D.len_of(r, args.kind) for r in rows]
 
@@ -138,10 +148,11 @@ def main():
                    frontend_layers=args.frontend_layers, proj_dim=args.proj_dim)
     model = VideoText(pose_kw, args.text_model, args.proj_dim).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"pools: groups gh={len(gsrc['gh'])} mv={len(gsrc['mv'])} "
-          f"gsl={len(gsrc['gsl'])} | rows={len(rows)} | val={len(val_rows)} "
-          f"({len(val_groups)} val texts) | params {n_params/1e6:.1f}M | "
-          f"device={device}", flush=True)
+    print(f"pools: " + " ".join(f"{s}={len(gsrc.get(s, []))}"
+                                for s in sorted(gsrc)) +
+          f" | rows={len(rows)} | val={len(val_rows)} "
+          f"({len(val_groups)} val texts) | jw val {len(jw_val)} | "
+          f"params {n_params/1e6:.1f}M | device={device}", flush=True)
 
     pose_params = list(model.pose.parameters()) + [model.scale]
     text_params = list(model.text.parameters())
@@ -150,7 +161,7 @@ def main():
         {"params": text_params, "lr": args.text_lr},
     ])
     sched = None
-    if args.warmup_steps > 0:
+    if not args.resume and args.warmup_steps > 0:
         from torch.optim.lr_scheduler import (CosineAnnealingLR, LinearLR,
                                               SequentialLR)
         total_steps = args.epochs * (args.clips_per_epoch // args.batch + 1)
@@ -169,7 +180,10 @@ def main():
         "total_clips": len(rows),
         "clips_per_epoch": args.clips_per_epoch,
         "fractions": {"mv": args.mv_frac, "gsl": args.gsl_frac,
-                      "gh": round(1 - args.mv_frac - args.gsl_frac, 2)},
+                      "jw": args.jw_frac,
+                      "gh": round(1 - args.mv_frac - args.gsl_frac
+                                  - args.jw_frac, 2)},
+        "jw_source": jw_sources, "jw_val_rows": len(jw_val),
         "val_rows": len(val_rows), "val_texts": len(val_groups),
         "vocab": {"pose": None, "text": args.text_model},
     }
@@ -177,15 +191,21 @@ def main():
            "batch": args.batch, "clips_per_epoch": args.clips_per_epoch,
            "lr": args.lr, "text_lr": args.text_lr,
            "warmup_steps": args.warmup_steps, "mv_frac": args.mv_frac,
-           "gsl_frac": args.gsl_frac, "vv_weight": args.vv_weight,
+           "gsl_frac": args.gsl_frac, "jw_frac": args.jw_frac,
+           "jw_source": jw_sources, "vv_weight": args.vv_weight,
            "text_model": args.text_model, "proj_dim": args.proj_dim,
            "pose_kw": pose_kw, "kind": args.kind, "epochs": args.epochs,
            "seed": args.seed, "n_params_M": round(n_params / 1e6, 2)}
     rl = RunLog(f"contrastive_{args.tag}", cfg, extra=manifest)
     ep_cols = ["ep", "clock", "train_s", "val_s", "loss", "l_vt", "l_tv",
                "l_vv", "sim_pos", "sim_neg", "r1_v2t", "r5_v2t", "r1_t2v",
-               "r5_t2v", "lr_pose", "lr_text", "scale", "grad_avg",
+               "r5_t2v", "r1_v2t_jw", "r1_t2v_jw", "r5_v2t_jw",
+               "lr_pose", "lr_text", "scale", "grad_avg",
                "grad_max", "n_batches", "clips_s"]
+    if args.resume and not last_pt.exists():
+        print(f"WARNING: --resume set but {last_pt.name} is missing — "
+              f"starting fresh with the full schedule", flush=True)
+        args.resume = False
     fresh = not (args.resume and (rl.dir / "epochs.csv").exists())
     if fresh:
         rl.epoch_header(ep_cols)
@@ -194,14 +214,29 @@ def main():
         ck = torch.load(last_pt, map_location=device)
         model.load_state_dict(ck["state"])
         opt.load_state_dict(ck["opt"])
-        if sched is not None and ck.get("sched") is not None:
-            sched.load_state_dict(ck["sched"])
+        # always rebuild the schedule over the REMAINING epochs: the saved
+        # cosine was built for the old total and anneals to zero by then, so
+        # resuming with an extended --epochs would otherwise train pointlessly
+        # at ~0 LR after the old total passes. Restart-cosine (brief warmup,
+        # then a fresh decay) is the predictable, safe continuation.
+        from torch.optim.lr_scheduler import (CosineAnnealingLR, LinearLR,
+                                              SequentialLR)
+        n_batches = max(1, args.clips_per_epoch // args.batch + 1)
+        remain = (args.epochs - (ck["ep"] + 1) + 1) * n_batches
+        warm = min(100, max(10, remain // 10))
+        warmup = LinearLR(opt, start_factor=1e-2, total_iters=warm)
+        cosine = CosineAnnealingLR(opt, T_max=max(1, remain - warm))
+        sched = SequentialLR(opt, [warmup, cosine], milestones=[warm])
+        sched.load_state_dict  # placeholder to defeat flake pre-use lint
+        print(f"schedule rebuilt: fresh warmup({warm}Steps)+cosine over "
+              f"{remain} remaining steps ({args.epochs - (ck['ep'] + 1) + 1} "
+              f"epochs)", flush=True)
         best, start_ep = ck["best"], ck["ep"] + 1
         print(f"resumed at ep {start_ep} (best r@1 avg {best:.4f})", flush=True)
     else:
-        rl.line(f"run: mix(mv/gsl/gh)={args.mv_frac}/{args.gsl_frac}/"
-                f"{1 - args.mv_frac - args.gsl_frac:.2f} clips/ep="
-                f"{args.clips_per_epoch} batch={args.batch} vv="
+        rl.line(f"run: mix(mv/gsl/jw/gh)={args.mv_frac}/{args.gsl_frac}/"
+                f"{args.jw_frac}/{1 - args.mv_frac - args.gsl_frac - args.jw_frac:.2f} "
+                f"clips/ep={args.clips_per_epoch} batch={args.batch} vv="
                 f"{args.vv_weight} {n_params/1e6:.1f}M params -> "
                 f"{best_pt.name}")
 
@@ -210,7 +245,8 @@ def main():
     for ep in range(start_ep, args.epochs + 1):
         rng = random.Random(args.seed * 1000 + ep)
         idx = D.mix_index(rows, groups, args.clips_per_epoch,
-                          {"mv": args.mv_frac, "gsl": args.gsl_frac}, rng)
+                          {"mv": args.mv_frac, "gsl": args.gsl_frac,
+                           "jw": args.jw_frac}, rng)
         mix = D.index_stats(rows, idx)
         ep_rows = [rows[i] for i in idx]
         ep_lens = [lens_all[i] for i in idx]
@@ -269,11 +305,16 @@ def main():
                     "epoch_mix": mix})
         train_s = time.time() - t0
 
-        # ---- retrieval probe (full val pool) -----------------------------
+        # ---- retrieval probe (full val pool + JW val) --------------------
         t1 = time.time()
         V, T, tx, st = encode_pool(model, val_rows, tok, device, args.kind)
         from pipeline.pose_text import retrieval_metrics
         vm = retrieval_metrics(V, T)
+        vmjw = {"r1_v2t": -1.0, "r1_t2v": -1.0, "r5_v2t": -1.0}
+        if jw_val:
+            Vj, Tj, txj, stj = encode_pool(model, jw_val, tok, device,
+                                           args.kind)
+            vmjw = retrieval_metrics(Vj, Tj)
         val_s = time.time() - t1
         score = (vm["r1_v2t"] + vm["r1_t2v"]) / 2
 
@@ -284,6 +325,8 @@ def main():
                   f"{vm['sim_pos']:.4f}", f"{vm['sim_neg']:.4f}",
                   f"{vm['r1_v2t']:.4f}", f"{vm['r5_v2t']:.4f}",
                   f"{vm['r1_t2v']:.4f}", f"{vm['r5_t2v']:.4f}",
+                  f"{vmjw['r1_v2t']:.4f}", f"{vmjw['r1_t2v']:.4f}",
+                  f"{vmjw['r5_v2t']:.4f}" if vmjw["r1_v2t"] >= 0 else "-",
                   f"{opt.param_groups[0]['lr']:.3e}",
                   f"{opt.param_groups[1]['lr']:.3e}",
                   f"{float(model.scale.detach()):.3f}",

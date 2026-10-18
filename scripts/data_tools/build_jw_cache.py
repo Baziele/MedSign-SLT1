@@ -52,7 +52,17 @@ def build_source(source, cache):
                 if out.exists():
                     done_units += 1
                     continue
-                f = chapter_verse_feats(r["npz"], r["start_f"], r["end_f"])
+                f = chapter_verse_feats(r["npz"], r["start_f"], r["end_f"],
+                                        a_lo=int(r["a_lo"]) if "a_lo" in r
+                                        else None,
+                                        a_hi=int(r["a_hi"]) if "a_hi" in r
+                                        else None)
+                if f is None:
+                    n_short = getattr(build_source, "_n_short", 0) + 1
+                    build_source._n_short = n_short
+                    print(f"  SKIP {r['stem']}: no kept footage "
+                          f"(index should have dropped it)", flush=True)
+                    continue
                 cache.mkdir(parents=True, exist_ok=True)
                 np.save(out, np.ascontiguousarray(f, dtype=np.float32))
                 done_units += 1

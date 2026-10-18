@@ -63,8 +63,14 @@ class TextTower(nn.Module):
         self.proj = nn.Linear(self.backbone.config.d_model, proj_dim)
 
     def embed(self, input_ids, attention_mask):
-        out = self.backbone(input_ids=input_ids,
-                            attention_mask=attention_mask, return_dict=True)
+        # encoder-only: BartModel.forward with no decoder_input_ids still
+        # runs the FULL decoder (shifted copy of the inputs) every step —
+        # pure waste for embedding. Calling get_encoder() halves text-tower
+        # cost; the module tree is unchanged so saved checkpoints keep
+        # loading identically.
+        enc = self.backbone.get_encoder()
+        out = enc(input_ids=input_ids, attention_mask=attention_mask,
+                  return_dict=True)
         z = self.proj(masked_mean(out.last_hidden_state,
                                   attention_mask != 0))
         return F.normalize(z, dim=-1)
