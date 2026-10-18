@@ -326,6 +326,10 @@ def main():
         vmjw = val_metrics(model, jw_val_loader, tok, device, True, crit)
         if jw_val_loader is None:
             vmjw = {"val_bleu": -1.0, "exact": 0, "n": 0}
+        # release the MPS pool between epochs: the allocator holds freed
+        # blocks otherwise, growing the unified-memory footprint monotonically
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
         bleu_hist.append(vm["val_bleu"])
         s5 = sum(bleu_hist[-5:]) / min(5, len(bleu_hist))
         lr_now = opt.param_groups[1]["lr"]

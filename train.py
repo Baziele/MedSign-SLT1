@@ -55,27 +55,31 @@ def val_metrics(model, loader, tok, device, variable, crit):
     sum_loss, n_tok, n_correct, n_exact, n = 0.0, 0, 0, 0, 0
     preds, refs, stems_all = [], [], []
     t0 = time.time()
-    for b in loader:
-        src, tgt_in = b["src"].to(device), b["tgt_in"].to(device)
-        tgt_out, pad_mask = b["tgt_out"].to(device), b["pad_mask"].to(device)
-        if variable:
-            logits = model(src, tgt_in, pad_mask, b["src_mask"].to(device))
-            ys = model.greedy(src, b["src_mask"].to(device))
-        else:
-            logits = model(src, tgt_in, pad_mask)
-            ys = model.greedy(src)
-        loss = crit(logits.reshape(-1, len(tok)), tgt_out.reshape(-1))
-        nt = int((tgt_out != PAD_ID).sum())
-        sum_loss += loss.item() * nt
-        n_tok += nt
-        n_correct += int(((logits.argmax(-1) == tgt_out) & (tgt_out != PAD_ID)).sum())
-        bp = [tok.decode(y.tolist()) for y in ys]
-        preds += bp
-        refs += b["texts"]
-        stems_all += b["stems"]
-        n += len(b["stems"])
-        for p, r in zip(bp, b["texts"]):
-            n_exact += (p.strip().lower() == r.strip().lower())
+    # no_grad is not cosmetic: greedy decoding with autograd on built a
+    # retained compute graph per decoded clip across 3.8k clips/epoch, and
+    # the MPS pool held it — tens of GB attributed to the parent app.
+    with torch.no_grad():
+        for b in loader:
+            src, tgt_in = b["src"].to(device), b["tgt_in"].to(device)
+            tgt_out, pad_mask = b["tgt_out"].to(device), b["pad_mask"].to(device)
+            if variable:
+                logits = model(src, tgt_in, pad_mask, b["src_mask"].to(device))
+                ys = model.greedy(src, b["src_mask"].to(device))
+            else:
+                logits = model(src, tgt_in, pad_mask)
+                ys = model.greedy(src)
+            loss = crit(logits.reshape(-1, len(tok)), tgt_out.reshape(-1))
+            nt = int((tgt_out != PAD_ID).sum())
+            sum_loss += loss.item() * nt
+            n_tok += nt
+            n_correct += int(((logits.argmax(-1) == tgt_out) & (tgt_out != PAD_ID)).sum())
+            bp = [tok.decode(y.tolist()) for y in ys]
+            preds += bp
+            refs += b["texts"]
+            stems_all += b["stems"]
+            n += len(b["stems"])
+            for p, r in zip(bp, b["texts"]):
+                n_exact += (p.strip().lower() == r.strip().lower())
     d = _bleu_detail(preds, refs)
     out = {"loss": sum_loss / max(1, n_tok), "acc": n_correct / max(1, n_tok),
            "exact": n_exact, "n": n, "n_tok": n_tok,
