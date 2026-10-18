@@ -307,6 +307,23 @@ def main():
             gsum += gn
             gmax = max(gmax, gn)
             nb += 1
+            # MPS pool telemetry: driver_allocated_memory is the unified-memory
+            # footprint macOS attributes to the parent app — the thing that
+            # ballooned past 30 GB in earlier attempts. Log it every step-20;
+            # if it passes 12 GB, release the cache pool in-place (small
+            # throughput hit buys back system stability).
+            if torch.backends.mps.is_available():
+                if i % 20 == 0:
+                    driver_gb = (torch.mps.driver_allocated_memory() / 2**30)
+                    alloc_gb = torch.mps.current_allocated_memory() / 2**30
+                    if driver_gb > 12.0:
+                        torch.mps.empty_cache()
+                        driver_gb = (torch.mps.driver_allocated_memory()
+                                     / 2**30)
+                    if i % 200 == 0:
+                        rl.line(f"ep {ep} batch {i}: gpu pool "
+                                f"alloc {alloc_gb:.2f}GB driver "
+                                f"{driver_gb:.2f}GB")
             if i % args.log_steps == 0 or i == len(loader):
                 el = time.time() - t0
                 bs = {}
