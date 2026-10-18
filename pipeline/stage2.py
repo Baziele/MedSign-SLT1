@@ -389,13 +389,22 @@ def main():
             rl.log.write(f"  ctc={ctc_tot/ctc_n:.3f} skip={ctc_skip} "
                          f"samp_p={samp_p:.3f}\n")
             rl.log.flush()
+        def _save_atomic(path, payload):
+            """Full-disk (or any I/O fault) mid-save must not leave a corpse:
+            write to tmp, then rename. A renamed file is always complete."""
+            tmp = path.with_suffix(".tmp.pt")
+            torch.save(payload, tmp)
+            tmp.replace(path)
+
         if improved:
-            torch.save({"cfg": cfg, "state": model.state_dict()}, best_pt)
+            _save_atomic(best_pt, {"cfg": cfg, "state": model.state_dict()})
             rl.line(f"  new best -> {best_pt.name}")
-        torch.save({"ep": ep, "best": best, "bad": bad, "best_ep": best_ep,
-                    "bleu_hist": bleu_hist, "cfg": cfg,
-                    "state": model.state_dict(), "opt": opt.state_dict(),
-                    "sched": sched.state_dict() if sched else None}, last_pt)
+        _save_atomic(last_pt, {"ep": ep, "best": best, "bad": bad,
+                               "best_ep": best_ep,
+                               "bleu_hist": bleu_hist, "cfg": cfg,
+                               "state": model.state_dict(),
+                               "opt": opt.state_dict(),
+                               "sched": sched.state_dict() if sched else None})
         if bad >= args.patience:
             rl.line(f"early stop at ep {ep}, best {best:.1f} "
                     f"({(time.time()-run_t0)/3600:.1f}h)")
