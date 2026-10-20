@@ -59,3 +59,6 @@ run_*.json
 
 # HF text-encoder cache (downloaded weights, never tracked)
 models/hf/
+
+# Agent/session handoff notes (local only, not part of the app)
+docs/handoff_*.md

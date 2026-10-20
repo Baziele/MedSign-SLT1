@@ -2,7 +2,7 @@
 import paramiko
 import sys
 
-HOST, USER, PW = "172.20.10.11", "baziele", "bazilarate"
+from wcreds import HOST, USER, PW
 
 cmd = sys.argv[1]
 timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 60

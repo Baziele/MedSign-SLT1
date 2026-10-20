@@ -143,7 +143,8 @@ def draw_skeleton(img, d, t, label=True, draw_face=True, pose_head=True):
     draw_dots(img, d["handR_xyz"][tt], C_HAND_R_JOINT, s)
 
     if label:
-        text = f"{str(d['video_file'])}  signer={str(d['signer'])}  f{tt}/{T}"
+        signer = str(d.get("signer", d.get("source", "")))
+        text = f"{str(d['video_file'])}  signer={signer}  f{tt}/{T}"
         if ended:
             text += "  END"
         cv2.putText(img, text, (10, int(24 * s)), cv2.FONT_HERSHEY_SIMPLEX,

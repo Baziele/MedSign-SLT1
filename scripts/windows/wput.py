@@ -2,7 +2,7 @@
 import paramiko
 import sys
 
-HOST, USER, PW = "172.20.10.11", "baziele", "bazilarate"
+from wcreds import HOST, USER, PW
 
 local = sys.argv[1]
 remote = sys.argv[2] if len(sys.argv) > 2 else "Documents/Code/medsign-multiview/" + local.split("/")[-1]

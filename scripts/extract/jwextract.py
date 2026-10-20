@@ -42,24 +42,82 @@ def _init_worker():
     _HOLISTIC = make_holistic()
 
 
+def _meta_payload(meta):
+    """Per-corpus metadata embedded in each npz. NWT chapters carry verse
+    timings; MWB weeks carry section timings + paragraph ids."""
+    base = {"docid": np.array(str(meta.get("docid") or ""))}
+    if meta.get("kind") == "mwb":
+        return {**base,
+                "issue": np.array(meta["issue"]),
+                "title": np.array(meta["title"]),
+                "sections_json": np.array(json.dumps(meta["sections"]))}
+    return {**base,
+            "book": np.array(meta["book"]),
+            "booknum": np.array(meta["booknum"], dtype=np.int32),
+            "chapter": np.array(meta["chapter"], dtype=np.int32),
+            "verses_json": np.array(json.dumps(meta["verses"]))}
+
+
 def _process_jw(task):
-    src, out, meta, max_width, stag = task
+    src, out, meta, max_width, stag, skip_secs = task
     t0 = time.time()
     try:
         cap = cv2.VideoCapture(src)
         if not cap.isOpened():
             raise RuntimeError("cv2 could not open video")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        skip_frames = int(round((skip_secs or 0) * fps))
+        if skip_frames > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, skip_frames)
+            # mp4 seeks land on keyframes; record where decoding resumes
+            skip_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or skip_frames)
+        # Picture sections (Art*) hold static images, not signing: jump over
+        # them entirely instead of paying Holistic cost per frame. Ranges
+        # come from section timestamps, so no detection is needed upfront.
+        drop = []
+        if meta.get("kind") == "mwb":
+            for s in meta.get("sections", []):
+                if str(s.get("label", "")).startswith("Art"):
+                    a = int(s["start_s"] * fps)
+                    b = int((s["start_s"] + s["dur_s"]) * fps) + 1
+                    drop.append((a, b))
+        drop.sort()
+
+        def in_drop(fr):
+            for a, b in drop:
+                if a <= fr < b:
+                    return True
+                if fr < a:
+                    break
+            return False
+
+        def drop_end(fr):
+            for a, b in drop:
+                if a <= fr < b:
+                    return b
+            return fr
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         scale = max_width / width if (max_width and width > max_width) else 1.0
         F, P, PV, W, HL, HR = [], [], [], [], [], []
         fp, pp, hlp, hrp = [], [], [], []
-        n = 0
+        kept = []
+        n = skip_frames
         while True:
+            if in_drop(n):
+                n = drop_end(n)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, n)
+                continue
             ok, frame = cap.read()
             if not ok:
                 break
+            actual = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0) - 1
+            if in_drop(actual):
+                # seek landed inside a drop range (keyframe slop)
+                n = actual + 1
+                continue
+            n = actual + 1
+            kept.append(actual)
             if scale != 1.0:
                 frame = cv2.resize(frame, (int(width * scale), int(height * scale)),
                                    interpolation=cv2.INTER_AREA)
@@ -74,10 +132,11 @@ def _process_jw(task):
             hlp.append(res.left_hand_landmarks is not None)
             HR.append(xyz_array(res.right_hand_landmarks, N_HAND))
             hrp.append(res.right_hand_landmarks is not None)
-            n += 1
         cap.release()
-        if n == 0:
+        if not F:
             raise RuntimeError("video contained 0 readable frames")
+        n = len(F)
+        start = kept[0]
         data = {
             "face_xyz": np.stack(F), "pose_xyz": np.stack(P),
             "pose_vis": np.stack(PV), "pose_world_xyz": np.stack(W),
@@ -88,13 +147,15 @@ def _process_jw(task):
             "handR_present": np.array(hrp, dtype=bool),
             "n_frames": np.array(n, dtype=np.int32),
             "fps": np.array(float(fps), dtype=np.float32),
+            # kept[] holds the original video frame behind each npz frame
+            # (leading skips + dropped picture ranges removed); absolute
+            # video time of npz frame i is frame_idx[i] / fps
+            "frame_idx": np.array(kept, dtype=np.int32),
+            "skip_seconds": np.array(round(start / fps, 3)),
+            "start_frame": np.array(start, dtype=np.int32),
             "video_file": np.array(os.path.basename(src)),
             "source": np.array(stag),
-            "book": np.array(meta["book"]),
-            "booknum": np.array(meta["booknum"], dtype=np.int32),
-            "chapter": np.array(meta["chapter"], dtype=np.int32),
-            "docid": np.array(str(meta.get("docid") or "")),
-            "verses_json": np.array(json.dumps(meta["verses"])),
+            **_meta_payload(meta),
         }
         tmp = out + ".tmp"
         with open(tmp, "wb") as f:
@@ -136,6 +197,13 @@ def main():
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--src", default=NWT,
                     help="dir of book*/ch*.mp4 (+ch*.json) videos")
+    ap.add_argument("--kind", choices=("nwt", "mwb"), default="nwt",
+                    help="nwt: book*/ch*.mp4 + verse JSONs; "
+                         "mwb: <issue>/*.mp4 + section JSONs")
+    ap.add_argument("--skip-seconds", type=float, default=0.0,
+                    help="seek past this many seconds before tracking "
+                         "(e.g. 4 to skip title cards); offset recorded "
+                         "in each npz as skip_seconds/start_frame")
     ap.add_argument("--dst", default=os.path.join(
         REPO, "data", "jw", "nwt-ghs"),
                     help="output dir (keypoints/ + progress.jsonl land here)")
@@ -144,10 +212,15 @@ def main():
     OUT_DIR = os.path.join(JW, "keypoints")
     stag = os.path.basename(os.path.normpath(JW))
 
-    mp4s = sorted(glob.glob(os.path.join(args.src, "*", "ch*.mp4")))
+    pat = "ch*.mp4" if args.kind == "nwt" else "*.mp4"
+    mp4s = sorted(glob.glob(os.path.join(args.src, "*", pat)))
+    if args.kind == "mwb":
+        # section-based corpora may also be flat (lfb: lessonNNN.mp4)
+        mp4s += sorted(glob.glob(os.path.join(args.src, pat)))
+        mp4s = sorted(set(mp4s))
     if args.max_videos:
         mp4s = mp4s[:args.max_videos]
-    print(f"{len(mp4s)} chapter videos found ({stag})", flush=True)
+    print(f"{len(mp4s)} {args.kind} videos found ({stag})", flush=True)
     os.makedirs(OUT_DIR, exist_ok=True)
 
     def out_of(src):
@@ -160,6 +233,12 @@ def main():
         d = json.load(open(js))
         book = os.path.basename(os.path.dirname(src))
         stem = os.path.splitext(os.path.basename(src))[0]
+        if args.kind == "mwb":
+            return {"stem": f"{book}/{stem}", "kind": "mwb",
+                    "issue": d.get("issue", book),
+                    "title": d.get("title", stem),
+                    "docid": d.get("docid"),
+                    "sections": d.get("sections", [])}
         return {"stem": f"{book}/{stem}",
                 "book": d["book"], "booknum": d["booknum"],
                 "chapter": d["chapter"], "docid": d.get("docid"),
@@ -178,7 +257,7 @@ def main():
             continue
         tasks.append((src, (src, out, meta_of(src),
                             args.max_width if args.max_width > 0 else None,
-                            stag)))
+                            stag, args.skip_seconds)))
     print(f"{len(tasks)} to process, {skipped} already done.", flush=True)
 
     print("loading holistic model ...", flush=True)

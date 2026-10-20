@@ -78,6 +78,35 @@ def source_of(stem):
 _TAG = re.compile(r"<[^>]+>")
 
 
+_BOOKS = (r"Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|"
+          r"Samuel|Kings|Chronicles|Ezra|Nehemiah|Esther|Job|Psalm\w*|Proverbs|"
+          r"Ecclesiastes|Isaiah|Jeremiah|Lamentations|Ezekiel|Daniel|Hosea|"
+          r"Joel|Amos|Obadiah|Jonah|Micah|Nahum|Habakkuk|Zephaniah|Haggai|"
+          r"Zechariah|Malachi|Matthew|Mark|Luke|John|Acts|Romans|Corinthians|"
+          r"Galatians|Ephesians|Philippians|Colossians|Thessalonians|Timothy|"
+          r"Titus|Philemon|Hebrews|James|Peter|Jude|Revelation")
+# trailing on-screen citation: '\u2019— Genesis 1:1' / '\u2019— Matthew 24:38, 39'
+_CITE = re.compile(
+    rf"[\u200b\s]*[—]\s*(?:[1-3]\s)?(?:{_BOOKS})\s+\d+"
+    r"(?::\d+)?(?:\s*[;,]\s*\d+(?::\d+)?)?\s*\.?$", re.I)
+# one segment of a reference-only line: 'Genesis 6:1-22' / 'Jude 6' / '2 Peter 2:5'
+_REFSEG = re.compile(
+    rf"(?:[1-3]\s)?(?:{_BOOKS})\s+\d+(?::\d+)?"
+    r"(?:\s*[-–]\s*\d+(?::\d+)?)*(?:\s*[,;.]\s*\d+(?::\d+)?)*$", re.I)
+# production metadata on MWB on-screen cards
+_META_PAREN = (
+    re.compile(r"\(\s*\d{1,3}\s*min\.\s*\)", re.I),      # (2 min.)
+    re.compile(r"\(\s*(?:lmd|th)\s[^)]*\)", re.I),       # ( lmd lesson 9 point 4 )
+)
+
+
+def _ref_only(t):
+    """True when the line is nothing but bible references ('Genesis 6:1-22;
+    Matthew 24:37-41; Jude 6') — the reference card, not signed prose."""
+    return t and all(_REFSEG.match(seg.strip(" \u200b"))
+                     for seg in t.split(";"))
+
+
 def _clean_text(t):
     """JW embedded text carries HTML fragments, entity-encoded on top
     (e.g. &lt;span class=\"verse\"&gt;), sometimes truncated mid-tag by the
@@ -87,7 +116,12 @@ def _clean_text(t):
     drop it and everything it swallowed. Collapses whitespace.
     Also strips trailing lesson-locate digit lists (>=2 trailing integers:
     'Anger is dangerous 4, 12, 41, 49' -> 'Anger is dangerous') — these are
-    page pointers, not signed content."""
+    page pointers, not signed content.
+    Also strips on-screen artifacts that are not signed content: trailing
+    reference citations ('\u2019— Genesis 1:1'), pure reference-list lines
+    ('Genesis 6:1-22; Matthew 24:37-41'), and MWB production markers
+    ('(2 min.)', '( lmd lesson 9 point 4 )'). References inside a real
+    sentence ('Read John 11:21-24. Then ask the audience:') are kept."""
     import html
     s = html.unescape(t or "")
     s = _TAG.sub(" ", s)
@@ -96,6 +130,14 @@ def _clean_text(t):
     lt = s.rfind("<")  # dangling truncated tag: no closing '>' after it
     if lt != -1 and ">" not in s[lt:]:
         s = s[:lt]
+    for pat in _META_PAREN:
+        s = pat.sub(" ", s)
+    s = _CITE.sub(" ", s)
+    if _ref_only(s):
+        s = ""
+    # trailing lesson-locate page pointers — the comma carries no trailing
+    # space in the pattern so real thousands ('was 40,500.') are never touched
+    s = re.sub(r"(?:\s\d{1,3},)+\s(?:and\s+)?\d{1,3}[.,;:]*\s*$", " ", s)
     s = re.sub(r"(?:\s(?:and\s+)?\d{1,3}){2,}[.,;:!]*\s*$", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -174,9 +216,16 @@ def load_jw_rows(sources=("nwt-ghs",)):
             with open(idx_csv) as f:
                 rows = list(csv.DictReader(f))
             # self-heal: GPU-cached index may predate a text-cleaner fix —
-            # cleaning is idempotent and costs nothing at load time
+            # cleaning is idempotent and costs nothing at load time;
+            # re-filtering drops rows that became ref-only/marker-only
+            # (e.g. '(2 min.) INFORMAL WITNESSING.') under the newer cleaner
+            kept = []
             for r in rows:
-                r["text"] = _clean_text(r["text"])
+                c = _clean_text(r["text"])
+                if len(c.split()) >= _MIN_WORDS:
+                    r["text"] = c
+                    kept.append(r)
+            rows = kept
         else:
             rows = []
             n_dropped = 0

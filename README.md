@@ -22,6 +22,11 @@
 - `data/` — all datasets (mostly git-ignored, reproducible):
   - `data/jw/nwt-ghs/` — Ghanaian SL Bible keypoints + `progress.jsonl`
   - `data/jw/nwt-nns/` — Nigerian SL Bible keypoints + `progress.jsonl`
+  - `data/jw/mwb/` — MWB conventions keypoints (78, intro-skip 4s) +
+    `text/` per-issue section transcripts; + `progress.jsonl`
+  - `data/jw/lfb/` — LFB lesson keypoints (120, intro trimmed, Art
+    sections skipped, `reading_text` expanded) + `text/` lesson
+    transcripts; + `progress.jsonl`
   - `data/jw/thumbs/` — JW thumbnail cache
   - `data/multiview/keypoints/` — SignTalk multiview keypoints
     (`keypoints_corrupt/` = quarantined bad files)
@@ -39,7 +44,9 @@
 - `apk/`, `apkwork/` — pulled Android APKs (legacy, ignored).
 - Raw JW videos live in the **separate, unversioned**
   `medsign-data-pipeline/` folder (`nwt-ghs/`, `nns/`, `mwb/`, `lfb/`,
-  `samples/` + `download_*.py` fetchers).
+  `samples/` + `download_*.py` fetchers). MWB/LFB section transcripts
+  live here under `data/jw/{mwb,lfb}/text/`; the backfill scripts in
+  `medsign-data-pipeline/legacy/tools/` regenerate them if needed.
 
 ## Common commands (run from repo root)
 
