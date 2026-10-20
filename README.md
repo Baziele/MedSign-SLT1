@@ -1,65 +1,110 @@
-# MedSign — Ghanaian/Nigerian Sign Language translation
+# MedSign
 
-## Layout
+Machine translation of Ghanaian Sign Language video into plain English text.
 
-- `train.py`, `model.py`, `dataset.py`, `tokenizer.py`, `bpe_tokenizer.py`,
-  `preprocess.py`, `render_skeleton.py`, `extract_keypoints.py`,
-  `gen_landmark_map.py`, `make_*_splits.py`, `translate.py`,
-  `translate_video.py`, `retrieval_baseline.py` — product code (flat on
-  purpose: the modules cross-import as top-level names).
-- `tokenizer.json`, `tokenizer_all.json`, `bpe_all_8k.json` — vocab files.
-  They stay at root because frozen checkpoint configs reference these
-  exact paths.
-- `scripts/extract/` — keypoint extraction (`jwextract.py` = JW pipeline
-  with `--src/--dst`, `wextract.py` = multiview, `gextract.py` = GSL
-  dictionary, `wlasl_extract.py`) + status tools (`xstat.py`, `jwstat.py`,
-  `nnsstat.py`) + `run_nns_extract.sh` watchdog.
-- `scripts/windows/` — Windows-box helpers (`wssh.py`, `wput.py`,
-  `run_*.bat`, `launch_*.ps1`, `babysit.py`).
-- `scripts/data_tools/` — `download_gsl.py`, `clean_dictionary.py`,
-  `analyze_zip.py`.
-- `bench/` — MediaPipe/kernel benchmarks (Kaggle-oriented).
-- `data/` — all datasets (mostly git-ignored, reproducible):
-  - `data/jw/nwt-ghs/` — Ghanaian SL Bible keypoints + `progress.jsonl`
-  - `data/jw/nwt-nns/` — Nigerian SL Bible keypoints + `progress.jsonl`
-  - `data/jw/mwb/` — MWB conventions keypoints (78, intro-skip 4s) +
-    `text/` per-issue section transcripts; + `progress.jsonl`
-  - `data/jw/lfb/` — LFB lesson keypoints (120, intro trimmed, Art
-    sections skipped, `reading_text` expanded) + `text/` lesson
-    transcripts; + `progress.jsonl`
-  - `data/jw/thumbs/` — JW thumbnail cache
-  - `data/multiview/keypoints/` — SignTalk multiview keypoints
-    (`keypoints_corrupt/` = quarantined bad files)
-  - `data/multiview/mv-data/`, `data/multiview/Medsign/` — multiview videos
-  - `data/gsl/` — GSL dictionary videos/keypoints/manifests
-  - `data/splits/` — frozen train/val/test CSVs (**tracked**)
-  - `data/cache/` — extracted feature cache (`dataset.py`)
-  - `data/live/` — self-test clips + their keypoints
-- `models/` — vocab copies, registry, released checkpoints;
-  `models/checkpoints/` — training outputs (`best*.pt`, `last*.pt`).
-- `translation/`, `retrieval/`, `previews/`, `experiments/` —
-  generated outputs (git-ignored, reproducible).
-- `logs/` — all run logs. `scratch/` — personal clips, notes, one-off
-  artifacts (never committed). `docs/` — notes (`multiview_split.md`).
-- `apk/`, `apkwork/` — pulled Android APKs (legacy, ignored).
-- Raw JW videos live in the **separate, unversioned**
-  `medsign-data-pipeline/` folder (`nwt-ghs/`, `nns/`, `mwb/`, `lfb/`,
-  `samples/` + `download_*.py` fetchers). MWB/LFB section transcripts
-  live here under `data/jw/{mwb,lfb}/text/`; the backfill scripts in
-  `medsign-data-pipeline/legacy/tools/` regenerate them if needed.
+Most sign-language "translation" systems stop at glosses: sequences of dictionary
+labels that a human still has to interpret. MedSign skips that step entirely.
+A video of a signer goes in, a natural-language sentence comes out. The model is
+built for hospital communication first (clinics, maternity, ANC), with the broad
+Ghanaian Sign Language vocabulary as the longer-term goal.
 
-## Common commands (run from repo root)
+## Results
+
+| Test set | BLEU | Exact sentences |
+|---|---|---|
+| hospital-held-out validation | 23.3 | 685 of 3,494 (20%) |
+| signer-holdout validation | 30.2 | n/a |
+| long-form prose (held-out test chapters) | 1.7 | 7 of 363 |
+
+The previous baseline scored 19.0 BLEU on the same validation split and could
+not reproduce a single full sentence exactly. Long-form prose is the honest
+weak spot: verses run 25+ words and the current decoder is small, so it is the
+first target for the next generation.
+
+## Training data
+
+The model was trained on more than 330 hours of sign language video.
+Data preparation, text alignment, and train/val/test splitting are fully
+scripted in this repository; raw source videos are not distributed here.
+
+## How the model works
+
+Sign language carries meaning in the hands, the face, and the body at once, so
+the input is not a single stream. From each video frame the pipeline extracts
+MediaPipe keypoints: 225-dim body pose plus 633-dim face and hand landmarks,
+collected through the pipeline's extractor scripts.
+
+The model itself is small (about 12M parameters), which keeps it trainable on a
+laptop GPU. It runs in two training phases:
+
+* **Alignment pretraining.** A contrastive (CLIP-style) phase pairs sign video
+  embeddings with sentence embeddings from a BART text encoder, teaching the
+  pose tower what its visual features mean in language before any translation
+  happens.
+* **Translation training.** A temporal-convolution frontend downsamples frames
+  into tokens, a 4-layer transformer encoder codes them, and a 4-layer decoder
+  generates 8k-BPE sentence pieces. The loss is plain cross-entropy plus an
+  auxiliary CTC head that aligns frames to transcript tokens directly, so no
+  human-written gloss labels are ever needed. The pose tower starts from the
+  alignment-pretrained weights instead of randomly.
+
+## Reproducing the pipeline
+
+Set up the environment (Python 3.12):
 
 ```bash
-.venv312/bin/python train.py --tag v1 [--resume]
-.venv312/bin/python translate.py --split test_T --beam 5 -o translation/preds_test_T.csv
-.venv312/bin/python scripts/extract/jwstat.py    # GHS extraction status
-.venv312/bin/python scripts/extract/nnsstat.py   # NNS extraction status
-.venv312/bin/python scripts/extract/jwextract.py --workers 8 \
-    --src /path/to/videos --dst data/jw/nwt-nns  # generic JW extraction
+python3.12 -m venv .venv312
+.venv312/bin/pip install -r requirements.txt
 ```
 
-NNS extraction is kept alive by launchd (`com.medsign.nnsextract` →
-`scripts/extract/run_nns_extract.sh`); remove with
-`launchctl unload ~/Library/LaunchAgents/com.medsign.nnsextract.plist`
-once it reports complete.
+The train/val/test split CSVs are tracked in `data/splits/`, so evaluation is
+reproducible without touching the raw sources. For a full retrain, bring your
+own videos, then:
+
+```bash
+# 1. Extract keypoints from raw videos (MediaPipe).
+python extract_keypoints.py            # body-face-hands, per-video npz
+python scripts/extract/jwextract.py --workers 8 --src /path/to/videos --dst data/jw/<source>
+
+# 2. Verify every video/text pair before training (trims, alignment, lengths).
+python scripts/dev/verify_jw_pairs.py
+
+# 3. Alignment pretraining: contrastive video-to-text.
+python -m pipeline.contrastive --tag align_v3 --epochs 50 --batch 32 \
+    --jw-frac 0.25 --jw-source nwt-ghs,mwb,lfb
+
+# 4. Translation training, initializing the pose tower from step 3.
+python -m pipeline.stage2 --tag p1t2 --epochs 100 --batch 64 \
+    --from-pose models/checkpoints/pose_text_best_v3.pt \
+    --jw-source nwt-ghs,mwb,lfb
+
+# 5. Evaluate a finished checkpoint on every held-out pool.
+python scripts/eval_final.py --ckpt models/checkpoints/best_p1t2.pt \
+    --out logs/eval_final_p1t2.json
+
+# 6. Translate new video.
+python translate.py --split test_T --beam 5 -o translation/preds.csv
+python translate_video.py path/to/video.mp4
+```
+
+Training runs on Apple silicon (MPS) and CUDA, single GPU.
+
+## Roadmap
+
+The next generation replaces the fresh-trained decoder with an mBART-family
+backbone (for stronger long-sentence generation), adds beam search at decode
+time, and trains on additional video already collected for this purpose.
+After that comes cross-lingual transfer from related sign languages and the
+move from hospital sentences to everyday conversation.
+
+## Contributing
+
+Issues and pull requests are welcome. The pipeline scripts are plain and
+single-purpose, so they should read easily. If you work with sign-language
+data in Ghana and can contribute recordings or corrections, please open an
+issue.
+
+## License
+
+License to be selected; until then, the code is all-rights-reserved by the
+MedSign project authors. Please contact the maintainers before reuse.
