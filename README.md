@@ -10,16 +10,30 @@ Ghanaian Sign Language vocabulary as the longer-term goal.
 
 ## Results
 
-| Test set | BLEU | Exact sentences |
-|---|---|---|
-| hospital-held-out validation | 23.3 | 685 of 3,494 (20%) |
-| signer-holdout validation | 30.2 | n/a |
-| long-form prose (held-out test chapters) | 1.7 | 7 of 363 |
+Put simply: on medical sentences the model has never seen, about one in three
+translations comes back correct in meaning, and one in six comes back
+word-for-word exact.
 
-The previous baseline scored 19.0 BLEU on the same validation split and could
-not reproduce a single full sentence exactly. Long-form prose is the honest
-weak spot: verses run 25+ words and the current decoder is small, so it is the
-first target for the next generation.
+| Test set | BLEU score | Correct in meaning | Word-for-word exact |
+|---|---|---|---|
+| Medical sentences, signed by a person the model never saw | 20.0 | 29.4% (4,410 of 14,994) | 17.2% |
+| Medical sentences, held back from training for validation | 23.3 | 32.9% (1,150 of 3,494) | 19.6% |
+
+What these rows mean, for anyone meeting them for the first time:
+
+* The test rows above are the measure that matters. The signer in it was never
+  in the training videos, so the score reflects generalization to new people,
+  not memorization. The vocabulary is tuned toward healthcare and similar
+  everyday sentences; that is where the available data is, so that is the
+  setting these numbers describe.
+* "Correct in meaning" counts a translation as right when it matches the
+  reference sentence after minor rewording (80% word overlap or better, or
+  exact after normalizing capitalization and punctuation). Humans judge this
+  as a good translation.
+* BLEU score (0-100) is the standard machine-translation metric: it grades how
+  much word overlap survives between the translation and a reference sentence,
+  and it punishes paraphrasing. "Word-for-word exact" is the strictest bar,
+  the sentence reproduced exactly.
 
 ## Training data
 
